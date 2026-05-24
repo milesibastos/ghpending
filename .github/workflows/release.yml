@@ -129,8 +129,7 @@ jobs:
           gh release create "$TAG" artifacts/*.tar.gz artifacts/*.sha256 \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
-            --notes-file body.md \
-            --draft
+            --notes-file body.md
 
   crates-io:
     needs: build

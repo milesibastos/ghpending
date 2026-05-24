@@ -21,7 +21,7 @@ cargo install ghpending
 ### mise
 
 ```sh
-mise use -g ubi:akitaonrails/ghpending
+mise use -g github:akitaonrails/ghpending
 ```
 
 ### From source
@@ -29,6 +29,22 @@ mise use -g ubi:akitaonrails/ghpending
 ```sh
 git clone https://github.com/akitaonrails/ghpending
 cargo install --path ghpending
+```
+
+## Upgrading
+
+```sh
+# Homebrew
+brew upgrade ghpending
+
+# Cargo
+cargo install ghpending --force
+
+# mise
+mise upgrade ghpending
+
+# From source
+cd ghpending && git pull && cargo install --path .
 ```
 
 ## Usage
