@@ -8,13 +8,16 @@ use crate::github::{ItemKind, RepoResult, RepoStatus};
 const HEADER_WIDTH: usize = 60;
 
 fn term_width() -> usize {
-    terminal_size()
-        .map(|(Width(w), _)| w as usize)
-        .unwrap_or(80)
+    terminal_size().map_or(80, |(Width(w), _)| w as usize)
 }
 
 fn should_colorize() -> bool {
     std::env::var("NO_COLOR").is_err()
+}
+
+/// Apply a color style only when `color` is true; otherwise return the text as-is.
+fn paint<'a>(text: &'a str, color: bool, style: impl FnOnce(&'a str) -> String) -> String {
+    if color { style(text) } else { text.to_owned() }
 }
 
 pub fn render_digest(results: &[RepoResult]) -> String {
@@ -41,32 +44,25 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
         let pad = HEADER_WIDTH.saturating_sub(used);
         let dashes = "─".repeat(pad);
 
-        if color {
-            out.push_str(&format!(
-                "{}{}{}{}\n",
-                prefix,
-                result.repo.bold().cyan(),
-                suffix,
-                dashes
-            ));
-        } else {
-            out.push_str(&format!("{}{}{}{}\n", prefix, result.repo, suffix, dashes));
-        }
+        let repo_colored = paint(&result.repo, color, |s| format!("{}", s.bold().cyan()));
+        out.push_str(&format!("{prefix}{repo_colored}{suffix}{dashes}\n"));
 
         match &result.status {
             RepoStatus::NotFound => {
-                if color {
-                    out.push_str(&format!("  {}\n", "(not found or no access)".dimmed()));
-                } else {
-                    out.push_str("  (not found or no access)\n");
-                }
+                let msg = paint("(not found or no access)", color, |s| {
+                    format!("{}", s.dimmed())
+                });
+                out.push_str(&format!("  {msg}\n"));
+            }
+            RepoStatus::Error(e) => {
+                let msg = paint(&format!("(error: {e})"), color, |s| {
+                    format!("{}", s.red().dimmed())
+                });
+                out.push_str(&format!("  {msg}\n"));
             }
             RepoStatus::Items(items) if items.is_empty() => {
-                if color {
-                    out.push_str(&format!("  {}\n", "(nothing pending)".dimmed()));
-                } else {
-                    out.push_str("  (nothing pending)\n");
-                }
+                let msg = paint("(nothing pending)", color, |s| format!("{}", s.dimmed()));
+                out.push_str(&format!("  {msg}\n"));
             }
             RepoStatus::Items(items) => {
                 let title_max = if width > 20 { width - 20 } else { 10 };
@@ -74,36 +70,25 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
                 for item in items {
                     let (kind_str, number_str, title_str) = match item.kind {
                         ItemKind::PullRequest => {
-                            let ks = if color {
-                                format!("{}", "PR ".magenta())
-                            } else {
-                                "PR ".into()
-                            };
+                            let ks = paint("PR ", color, |s| format!("{}", s.magenta()));
                             let ns = format!("#{}", item.number);
                             let title = truncate_title(&item.title, title_max);
                             (ks, ns, title)
                         }
                         ItemKind::Issue => {
-                            let ks = if color {
-                                format!("{}", "ISS".yellow())
-                            } else {
-                                "ISS".into()
-                            };
+                            let ks = paint("ISS", color, |s| format!("{}", s.yellow()));
                             let ns = format!("#{}", item.number);
                             let title = truncate_title(&item.title, title_max);
                             (ks, ns, title)
                         }
                     };
 
-                    out.push_str(&format!("  {}  {}  {}\n", kind_str, number_str, title_str));
+                    out.push_str(&format!("  {kind_str}  {number_str}  {title_str}\n"));
 
                     let rel = relative_time(&item.created_at, &now);
                     let meta = format!("opened {} ago by {}", rel, item.author);
-                    if color {
-                        out.push_str(&format!("        {}\n", meta.dimmed()));
-                    } else {
-                        out.push_str(&format!("        {}\n", meta));
-                    }
+                    let meta_colored = paint(&meta, color, |s| format!("{}", s.dimmed()));
+                    out.push_str(&format!("        {meta_colored}\n"));
                 }
             }
         }
@@ -154,6 +139,18 @@ mod tests {
         let out = render_inner(&results, false, 80);
         assert!(out.contains("owner/missing"));
         assert!(out.contains("not found or no access"));
+    }
+
+    #[test]
+    fn repo_error_renders_message() {
+        let results = vec![RepoResult {
+            repo: "owner/flaky".into(),
+            status: RepoStatus::Error("rate limited".into()),
+        }];
+        let out = render_inner(&results, false, 80);
+        assert!(out.contains("owner/flaky"));
+        assert!(out.contains("error:"));
+        assert!(out.contains("rate limited"));
     }
 
     #[test]

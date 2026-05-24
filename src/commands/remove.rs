@@ -10,14 +10,10 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
-    let to_remove = MultiSelect::new(
-        "Uncheck repos to remove (space to toggle, enter to confirm):",
-        cfg.repos.clone(),
-    )
-    .prompt()?;
+    let to_remove = MultiSelect::new("Select repos to remove:", cfg.repos.clone()).prompt()?;
 
     let remove_set: std::collections::HashSet<&str> =
-        to_remove.iter().map(|s| s.as_str()).collect();
+        to_remove.iter().map(std::string::String::as_str).collect();
     cfg.repos.retain(|r| !remove_set.contains(r.as_str()));
     config::save(&cfg)?;
 

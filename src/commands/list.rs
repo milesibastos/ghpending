@@ -7,7 +7,7 @@ pub fn run() -> Result<()> {
         println!("No repos tracked. Run `ghpending add` to get started.");
     } else {
         for repo in &cfg.repos {
-            println!("{}", repo);
+            println!("{repo}");
         }
     }
     Ok(())

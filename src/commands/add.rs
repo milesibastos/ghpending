@@ -7,24 +7,24 @@ use crate::{config, github};
 pub async fn run(crab: &Octocrab) -> Result<()> {
     let mut cfg = config::load()?;
 
-    let username = match cfg.user.clone() {
-        Some(u) => u,
-        None => {
-            let u = Text::new("GitHub username or org to list repos from:").prompt()?;
-            let u = u.trim().to_string();
-            cfg.user = Some(u.clone());
-            config::save(&cfg)?;
-            u
-        }
+    let username = if let Some(u) = cfg.user.clone() {
+        u
+    } else {
+        let u = Text::new("GitHub username or org to list repos from:").prompt()?;
+        let u = u.trim().to_string();
+        cfg.user = Some(u.clone());
+        config::save(&cfg)?;
+        u
     };
 
     let found = github::list_user_repos(crab, &username).await?;
     if found.is_empty() {
-        println!("No public repos found for: {}", username);
+        println!("No public repos found for: {username}");
         return Ok(());
     }
 
-    let already: std::collections::HashSet<&str> = cfg.repos.iter().map(|s| s.as_str()).collect();
+    let already: std::collections::HashSet<&str> =
+        cfg.repos.iter().map(std::string::String::as_str).collect();
 
     let defaults: Vec<usize> = found
         .iter()

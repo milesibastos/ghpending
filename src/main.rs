@@ -24,21 +24,10 @@ async fn main() -> Result<()> {
     };
 
     match &cli.command {
-        Some(Commands::List) => {
-            commands::list::run()?;
-        }
-        Some(Commands::Rm) => {
-            commands::remove::run()?;
-        }
-        Some(Commands::Add) | None => match &cli.command {
-            Some(Commands::Add) => {
-                commands::add::run(&crab).await?;
-            }
-            None => {
-                commands::digest::run(&crab).await?;
-            }
-            _ => unreachable!(),
-        },
+        Some(Commands::List) => commands::list::run()?,
+        Some(Commands::Rm) => commands::remove::run()?,
+        Some(Commands::Add) => commands::add::run(&crab).await?,
+        None => commands::digest::run(&crab).await?,
     }
 
     Ok(())

@@ -7,26 +7,26 @@ pub fn relative_time(then: &DateTime<Utc>, now: &DateTime<Utc>) -> String {
     }
     let mins = secs / 60;
     if mins < 60 {
-        return format!("{}m", mins);
+        return format!("{mins}m");
     }
     let hours = mins / 60;
     if hours < 24 {
-        return format!("{}h", hours);
+        return format!("{hours}h");
     }
     let days = hours / 24;
     if days < 7 {
-        return format!("{}d", days);
+        return format!("{days}d");
     }
     let weeks = days / 7;
     if weeks < 4 {
-        return format!("{}w", weeks);
+        return format!("{weeks}w");
     }
     let months = days / 30;
     if months < 12 {
-        return format!("{}mo", months);
+        return format!("{months}mo");
     }
     let years = days / 365;
-    format!("{}y", years)
+    format!("{years}y")
 }
 
 pub fn truncate_title(title: &str, max_width: usize) -> String {
@@ -126,5 +126,13 @@ mod tests {
     #[test]
     fn truncate_width_one() {
         assert_eq!(truncate_title("anything", 1), "\u{2026}");
+    }
+
+    #[test]
+    fn truncate_handles_multibyte() {
+        let title = "日本語のタイトルが長すぎる";
+        let result = truncate_title(title, 5);
+        assert_eq!(result.chars().count(), 5);
+        assert!(result.ends_with('\u{2026}'));
     }
 }
