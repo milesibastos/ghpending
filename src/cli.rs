@@ -1,0 +1,21 @@
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "ghpending",
+    about = "Digest of open issues and PRs across watched repos"
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Pick repos from a GitHub user/org to track
+    Add,
+    /// Remove repos from the watch list
+    Rm,
+    /// Print all tracked repos
+    List,
+}
