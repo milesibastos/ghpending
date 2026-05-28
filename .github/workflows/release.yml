@@ -111,14 +111,18 @@ jobs:
           echo "" >> body.md
           echo "## Install" >> body.md
           echo '```bash' >> body.md
-          echo "# macOS (Homebrew)" >> body.md
+          echo "# macOS / Linux (Homebrew)" >> body.md
           echo "brew tap akitaonrails/tap && brew install ghpending" >> body.md
+          echo "" >> body.md
+          echo "# Arch Linux (AUR)" >> body.md
+          echo "yay -S ghpending-bin      # prebuilt Linux x86_64 binary" >> body.md
+          echo "yay -S ghpending          # builds from source" >> body.md
           echo "" >> body.md
           echo "# From crates.io" >> body.md
           echo "cargo install ghpending" >> body.md
           echo "" >> body.md
           echo "# mise" >> body.md
-          echo "mise use -g ubi:akitaonrails/ghpending" >> body.md
+          echo "mise use -g github:akitaonrails/ghpending" >> body.md
           echo '```' >> body.md
 
       - name: Create GitHub Release
@@ -233,3 +237,87 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "ghpending $VERSION"
           git push
+
+  aur:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pkg: ghpending
+            template: source
+          - pkg: ghpending-bin
+            template: bin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        if: matrix.template == 'bin'
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Render PKGBUILD with current version + checksums
+        env:
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_KEY:-${{ secrets.AUR_SSH_KEY }}}" ]; then
+            echo "::warning::Skipping AUR push — no AUR_SSH_KEY secret set"
+            echo "skip=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          VERSION="${VERSION_TAG#v}"
+          REPO_URL="https://github.com/akitaonrails/ghpending"
+
+          if [ "${{ matrix.template }}" = "source" ]; then
+            SRC_SHA=$(curl -fsSL "$REPO_URL/archive/refs/tags/v${VERSION}.tar.gz" | sha256sum | awk '{print $1}')
+            python3 - <<PY
+          import pathlib, re
+          p = pathlib.Path("packaging/aur/PKGBUILD")
+          t = p.read_text()
+          t = re.sub(r"^pkgver=.*", f"pkgver=${VERSION}", t, flags=re.M)
+          t = re.sub(r"^pkgrel=.*", "pkgrel=1", t, flags=re.M)
+          t = re.sub(r"^sha256sums=.*", f"sha256sums=('${SRC_SHA}')", t, flags=re.M)
+          pathlib.Path("PKGBUILD").write_text(t)
+          PY
+          else
+            BIN_SHA=$(awk '{print $1}' artifacts/ghpending-linux-x86_64.tar.gz.sha256)
+            LIC_SHA=$(curl -fsSL "$REPO_URL/raw/v${VERSION}/LICENSE" | sha256sum | awk '{print $1}')
+            RME_SHA=$(curl -fsSL "$REPO_URL/raw/v${VERSION}/README.md" | sha256sum | awk '{print $1}')
+            python3 - <<PY
+          import pathlib, re
+          p = pathlib.Path("packaging/aur/PKGBUILD-bin")
+          t = p.read_text()
+          t = re.sub(r"^pkgver=.*", f"pkgver=${VERSION}", t, flags=re.M)
+          t = re.sub(r"^pkgrel=.*", "pkgrel=1", t, flags=re.M)
+          t = re.sub(
+              r"^sha256sums=\([^)]*\)",
+              f"sha256sums=(\n    '${LIC_SHA}'\n    '${RME_SHA}'\n)",
+              t, flags=re.M,
+          )
+          t = re.sub(
+              r"^sha256sums_x86_64=.*",
+              f"sha256sums_x86_64=('${BIN_SHA}')",
+              t, flags=re.M,
+          )
+          pathlib.Path("PKGBUILD").write_text(t)
+          PY
+          fi
+
+          echo "--- rendered PKGBUILD ---"
+          cat PKGBUILD
+
+      - name: Publish to AUR
+        if: env.skip != 'true'
+        uses: KSXGitHub/github-actions-deploy-aur@v4
+        with:
+          pkgname: ${{ matrix.pkg }}
+          pkgbuild: PKGBUILD
+          commit_username: AkitaOnRails
+          commit_email: boss@akitaonrails.com
+          ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
+          commit_message: ${{ matrix.pkg }} ${{ github.ref_name }}
+          ssh_keyscan_types: rsa,ecdsa,ed25519

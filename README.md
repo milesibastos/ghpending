@@ -12,6 +12,13 @@ See open issues and pull requests across the GitHub repos you care about, at a g
 brew tap akitaonrails/tap && brew install ghpending
 ```
 
+### Arch Linux (AUR)
+
+```sh
+yay -S ghpending-bin    # prebuilt x86_64 binary, fastest
+yay -S ghpending        # builds from source, x86_64/aarch64
+```
+
 ### Cargo
 
 ```sh
@@ -36,6 +43,9 @@ cargo install --path ghpending
 ```sh
 # Homebrew
 brew upgrade ghpending
+
+# AUR (any helper that respects upstream changes)
+yay -Syu ghpending-bin
 
 # Cargo
 cargo install ghpending --force

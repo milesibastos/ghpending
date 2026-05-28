@@ -9,7 +9,7 @@ repository = "https://github.com/akitaonrails/ghpending"
 homepage = "https://github.com/akitaonrails/ghpending"
 keywords = ["github", "cli", "issues", "pull-requests", "dashboard"]
 categories = ["command-line-utilities"]
-exclude = [".github/", "target/", ".claude/", "docs/"]
+exclude = [".github/", "target/", ".claude/", "docs/", "packaging/"]
 
 [profile.release]
 strip = true
