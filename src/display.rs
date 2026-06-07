@@ -5,8 +5,6 @@ use terminal_size::{Width, terminal_size};
 use crate::format::{relative_time, truncate_title};
 use crate::github::{ItemKind, RepoResult, RepoStatus};
 
-const HEADER_WIDTH: usize = 60;
-
 fn term_width() -> usize {
     terminal_size().map_or(80, |(Width(w), _)| w as usize)
 }
@@ -49,15 +47,8 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
         }
         shown += 1;
 
-        let prefix = "━━ ";
-        let suffix = " ";
-        let name_len = result.repo.chars().count();
-        let used = prefix.chars().count() + name_len + suffix.chars().count();
-        let pad = HEADER_WIDTH.saturating_sub(used);
-        let dashes = "─".repeat(pad);
-
         let repo_colored = paint(&result.repo, color, |s| format!("{}", s.bold().cyan()));
-        body.push_str(&format!("{prefix}{repo_colored}{suffix}{dashes}\n"));
+        body.push_str(&format!("━━ {repo_colored}\n"));
 
         match &result.status {
             RepoStatus::NotFound => {
@@ -189,15 +180,14 @@ mod tests {
     }
 
     #[test]
-    fn header_uses_separator_dashes() {
+    fn header_is_just_prefix_and_name() {
         let results = vec![RepoResult {
             repo: "a/b".into(),
             status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
         }];
         let out = render_inner(&results, false, 80);
         let header_line = out.lines().find(|l| l.contains("━━")).unwrap();
-        assert!(header_line.contains("━━"));
-        assert!(header_line.contains("─"));
+        assert_eq!(header_line, "━━ a/b");
     }
 
     #[test]
