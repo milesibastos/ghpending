@@ -30,12 +30,24 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
     }
 
     let now = Utc::now();
-    let mut out = String::new();
+    let total = results.len();
+    let with_pending = results
+        .iter()
+        .filter(|r| matches!(&r.status, RepoStatus::Items(items) if !items.is_empty()))
+        .count();
 
-    for (i, result) in results.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
+    let mut body = String::new();
+    let mut shown = 0;
+
+    for result in results {
+        if matches!(&result.status, RepoStatus::Items(items) if items.is_empty()) {
+            continue;
         }
+
+        if shown > 0 {
+            body.push('\n');
+        }
+        shown += 1;
 
         let prefix = "━━ ";
         let suffix = " ";
@@ -45,24 +57,20 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
         let dashes = "─".repeat(pad);
 
         let repo_colored = paint(&result.repo, color, |s| format!("{}", s.bold().cyan()));
-        out.push_str(&format!("{prefix}{repo_colored}{suffix}{dashes}\n"));
+        body.push_str(&format!("{prefix}{repo_colored}{suffix}{dashes}\n"));
 
         match &result.status {
             RepoStatus::NotFound => {
                 let msg = paint("(not found or no access)", color, |s| {
                     format!("{}", s.dimmed())
                 });
-                out.push_str(&format!("  {msg}\n"));
+                body.push_str(&format!("  {msg}\n"));
             }
             RepoStatus::Error(e) => {
                 let msg = paint(&format!("(error: {e})"), color, |s| {
                     format!("{}", s.red().dimmed())
                 });
-                out.push_str(&format!("  {msg}\n"));
-            }
-            RepoStatus::Items(items) if items.is_empty() => {
-                let msg = paint("(nothing pending)", color, |s| format!("{}", s.dimmed()));
-                out.push_str(&format!("  {msg}\n"));
+                body.push_str(&format!("  {msg}\n"));
             }
             RepoStatus::Items(items) => {
                 let title_max = if width > 20 { width - 20 } else { 10 };
@@ -83,18 +91,25 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
                         }
                     };
 
-                    out.push_str(&format!("  {kind_str}  {number_str}  {title_str}\n"));
+                    body.push_str(&format!("  {kind_str}  {number_str}  {title_str}\n"));
 
                     let rel = relative_time(&item.created_at, &now);
                     let meta = format!("opened {} ago by {}", rel, item.author);
                     let meta_colored = paint(&meta, color, |s| format!("{}", s.dimmed()));
-                    out.push_str(&format!("        {meta_colored}\n"));
+                    body.push_str(&format!("        {meta_colored}\n"));
                 }
             }
         }
     }
 
-    out
+    let summary = format!("{total} projects checked, {with_pending} with pending tasks");
+    let summary_colored = paint(&summary, color, |s| format!("{}", s.dimmed()));
+
+    if body.is_empty() {
+        format!("{summary_colored}\n")
+    } else {
+        format!("{summary_colored}\n\n{body}")
+    }
 }
 
 #[cfg(test)]
@@ -120,14 +135,15 @@ mod tests {
     }
 
     #[test]
-    fn repo_with_zero_items() {
+    fn empty_repo_is_skipped_from_listing() {
         let results = vec![RepoResult {
             repo: "owner/empty".into(),
             status: RepoStatus::Items(vec![]),
         }];
         let out = render_inner(&results, false, 80);
-        assert!(out.contains("owner/empty"));
-        assert!(out.contains("(nothing pending)"));
+        assert!(!out.contains("owner/empty"));
+        assert!(!out.contains("nothing pending"));
+        assert!(out.contains("1 projects checked, 0 with pending tasks"));
     }
 
     #[test]
@@ -176,16 +192,61 @@ mod tests {
     fn header_uses_separator_dashes() {
         let results = vec![RepoResult {
             repo: "a/b".into(),
-            status: RepoStatus::Items(vec![]),
+            status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
         }];
         let out = render_inner(&results, false, 80);
-        let first_line = out.lines().next().unwrap();
-        assert!(first_line.contains("━━"));
-        assert!(first_line.contains("─"));
+        let header_line = out.lines().find(|l| l.contains("━━")).unwrap();
+        assert!(header_line.contains("━━"));
+        assert!(header_line.contains("─"));
     }
 
     #[test]
     fn two_repos_separated_by_blank_line() {
+        let results = vec![
+            RepoResult {
+                repo: "a/b".into(),
+                status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
+            },
+            RepoResult {
+                repo: "c/d".into(),
+                status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 2, "y", 0)]),
+            },
+        ];
+        let out = render_inner(&results, false, 80);
+        let body = out.split_once("\n\n").unwrap().1;
+        assert!(body.contains("\n\n"));
+    }
+
+    #[test]
+    fn summary_counts_only_repos_with_items() {
+        let results = vec![
+            RepoResult {
+                repo: "a/empty".into(),
+                status: RepoStatus::Items(vec![]),
+            },
+            RepoResult {
+                repo: "a/withitems".into(),
+                status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
+            },
+            RepoResult {
+                repo: "a/missing".into(),
+                status: RepoStatus::NotFound,
+            },
+            RepoResult {
+                repo: "a/flaky".into(),
+                status: RepoStatus::Error("rate limited".into()),
+            },
+        ];
+        let out = render_inner(&results, false, 80);
+        assert!(out.contains("4 projects checked, 1 with pending tasks"));
+        assert!(!out.contains("a/empty"));
+        assert!(out.contains("a/withitems"));
+        assert!(out.contains("a/missing"));
+        assert!(out.contains("a/flaky"));
+    }
+
+    #[test]
+    fn all_empty_shows_only_summary() {
         let results = vec![
             RepoResult {
                 repo: "a/b".into(),
@@ -197,6 +258,6 @@ mod tests {
             },
         ];
         let out = render_inner(&results, false, 80);
-        assert!(out.contains("\n\n"));
+        assert_eq!(out, "2 projects checked, 0 with pending tasks\n");
     }
 }
