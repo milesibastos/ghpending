@@ -4,6 +4,7 @@ mod config;
 mod display;
 mod format;
 mod github;
+mod github_client;
 
 use anyhow::Result;
 use clap::Parser;
@@ -13,18 +14,7 @@ use cli::{Cli, Commands};
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let crab = {
-        let mut builder = octocrab::OctocrabBuilder::default();
-        if let Ok(t) = std::env::var("GITHUB_TOKEN")
-            && !t.is_empty()
-        {
-            builder = builder.personal_token(t);
-        }
-        builder = builder.set_connect_timeout(Some(web_time::Duration::from_secs(10)));
-        builder = builder.set_read_timeout(Some(web_time::Duration::from_secs(30)));
-        builder = builder.set_write_timeout(Some(web_time::Duration::from_secs(30)));
-        builder.build()?
-    };
+    let crab = github_client::build()?;
 
     match &cli.command {
         Some(Commands::List) => commands::list::run()?,

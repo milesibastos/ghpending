@@ -10,7 +10,7 @@ use crate::github::{RepoError, RepoResult, RepoStatus};
 use crate::{config, display, github};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_CONCURRENT_FETCHES: usize = 8;
+const MAX_CONCURRENT_FETCHES: usize = 4;
 
 pub async fn run(crab: &Octocrab) -> Result<()> {
     let cfg = config::load()?;

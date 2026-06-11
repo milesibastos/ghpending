@@ -14,13 +14,14 @@
 ## Runtime gotchas
 
 - `GITHUB_TOKEN` is optional for public repos/rate limit, but private repos only show up when the token can read them. Use `NO_COLOR=1` when snapshotting output.
+- GitHub API client auto-routes through a SOCKS proxy when one is already available at `127.0.0.1:9050`; `GHPENDING_GITHUB_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` are also honored for `socks5`/`socks5h` values. If no proxy is available, it falls back to direct API access.
 - Config is user-local, not repo-local: Linux `~/.config/ghpending/config.toml`, macOS `~/Library/Application Support/ghpending/config.toml`; saves use mode `0600` on Unix. On Linux, set a temporary `XDG_CONFIG_HOME` for manual runs if you do not want to mutate the real watch list.
 - `ghpending add --user <name>` persists/replaces the saved default user. `ghpending add --all` ignores the saved user and lists every token-visible owned/collaborator/org-member repo.
 - Listing source behavior is intentional: the authenticated user's own login uses the authenticated repo listing, org targets use org listing, and third-party users are public-only.
 
 ## Behavior to preserve
 
-- Digest fetches tracked repos with bounded concurrency (`MAX_CONCURRENT_FETCHES = 8`) and a 30s timeout window; timed-out/unstarted repos render as `timeout after 30s`.
+- Digest fetches tracked repos with bounded concurrency (`MAX_CONCURRENT_FETCHES = 4`) and a 30s timeout window; timed-out/unstarted repos render as `timeout after 30s`.
 - GitHub items are fetched from issues and pulls separately; PRs duplicated in the issues endpoint are skipped. Sort order is PRs first, then issues, with each group by number descending.
 - The digest omits repos with zero open items, but the summary still reports total repos checked and how many have pending tasks.
 - `add` stores repos sorted after selection.

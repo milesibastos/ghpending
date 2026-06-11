@@ -85,6 +85,10 @@ GITHUB_TOKEN=$(gh auth token) ghpending
 
 The token is read silently at startup — no configuration needed. To track **private** repos (and have them show up in `ghpending add`), the token needs the `repo` scope (classic) or read access to the repo's Contents, Issues and Pull requests (fine-grained).
 
+### GitHub API proxy (optional)
+
+If a SOCKS proxy is already listening at `127.0.0.1:9050`, `ghpending` uses it for GitHub API calls and falls back to direct API access when it is not available. You can also force a SOCKS proxy with `GHPENDING_GITHUB_PROXY=socks5h://host:port`; existing `HTTPS_PROXY` / `ALL_PROXY` values are honored when they use `socks5` or `socks5h`.
+
 ## Config
 
 The config file lives at:
