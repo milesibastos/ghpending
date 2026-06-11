@@ -30,7 +30,15 @@ pub struct RepoResult {
 pub enum RepoStatus {
     Items(Vec<RepoItem>),
     NotFound,
-    Error(String),
+    Error(RepoError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RepoError {
+    #[error("timeout after 30s")]
+    Timeout,
+    #[error("{0}")]
+    Api(String),
 }
 
 #[derive(Debug, Error)]
@@ -253,7 +261,7 @@ pub async fn fetch_repo_items(crab: &Octocrab, repo: &str) -> RepoResult {
         },
         Err(GithubError::Api(e)) => RepoResult {
             repo: repo.to_owned(),
-            status: RepoStatus::Error(e.to_string()),
+            status: RepoStatus::Error(RepoError::Api(e.to_string())),
         },
     }
 }

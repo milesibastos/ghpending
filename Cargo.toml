@@ -1,6 +1,6 @@
 [package]
 name = "ghpending"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "CLI to watch GitHub repos for open issues and pull requests at a glance"
 license = "MIT"
@@ -9,7 +9,7 @@ repository = "https://github.com/akitaonrails/ghpending"
 homepage = "https://github.com/akitaonrails/ghpending"
 keywords = ["github", "cli", "issues", "pull-requests", "dashboard"]
 categories = ["command-line-utilities"]
-exclude = [".github/", "target/", ".claude/", "docs/", "packaging/"]
+exclude = [".github/", "target/", ".claude/", "docs/", "packaging/", "AGENTS.md"]
 
 [profile.release]
 strip = true
@@ -30,3 +30,4 @@ terminal_size = "0.4.4"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "time"] }
 toml = "1.1.2"
+web-time = "1.1.0"

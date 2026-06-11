@@ -20,6 +20,9 @@ async fn main() -> Result<()> {
         {
             builder = builder.personal_token(t);
         }
+        builder = builder.set_connect_timeout(Some(web_time::Duration::from_secs(10)));
+        builder = builder.set_read_timeout(Some(web_time::Duration::from_secs(30)));
+        builder = builder.set_write_timeout(Some(web_time::Duration::from_secs(30)));
         builder.build()?
     };
 

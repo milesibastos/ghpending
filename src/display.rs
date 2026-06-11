@@ -33,6 +33,10 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
         .iter()
         .filter(|r| matches!(&r.status, RepoStatus::Items(items) if !items.is_empty()))
         .count();
+    let failures = results
+        .iter()
+        .filter(|r| matches!(&r.status, RepoStatus::Error(_)))
+        .count();
 
     let mut body = String::new();
     let mut shown = 0;
@@ -93,7 +97,11 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
         }
     }
 
-    let summary = format!("{total} projects checked, {with_pending} with pending tasks");
+    let summary = if failures > 0 {
+        format!("{total} projects attempted, {with_pending} with pending tasks, {failures} failed")
+    } else {
+        format!("{total} projects checked, {with_pending} with pending tasks")
+    };
     let summary_colored = paint(&summary, color, |s| format!("{}", s.dimmed()));
 
     if body.is_empty() {
@@ -106,7 +114,7 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::{ItemKind, RepoItem, RepoResult, RepoStatus};
+    use crate::github::{ItemKind, RepoError, RepoItem, RepoResult, RepoStatus};
 
     fn make_item(kind: ItemKind, number: u64, title: &str, days_ago: i64) -> RepoItem {
         let created_at = Utc::now() - chrono::Duration::days(days_ago);
@@ -152,7 +160,7 @@ mod tests {
     fn repo_error_renders_message() {
         let results = vec![RepoResult {
             repo: "owner/flaky".into(),
-            status: RepoStatus::Error("rate limited".into()),
+            status: RepoStatus::Error(RepoError::Api("rate limited".into())),
         }];
         let out = render_inner(&results, false, 80);
         assert!(out.contains("owner/flaky"));
@@ -224,15 +232,32 @@ mod tests {
             },
             RepoResult {
                 repo: "a/flaky".into(),
-                status: RepoStatus::Error("rate limited".into()),
+                status: RepoStatus::Error(RepoError::Api("rate limited".into())),
             },
         ];
         let out = render_inner(&results, false, 80);
-        assert!(out.contains("4 projects checked, 1 with pending tasks"));
+        assert!(out.contains("4 projects attempted, 1 with pending tasks, 1 failed"));
         assert!(!out.contains("a/empty"));
         assert!(out.contains("a/withitems"));
         assert!(out.contains("a/missing"));
         assert!(out.contains("a/flaky"));
+    }
+
+    #[test]
+    fn summary_counts_failures_when_no_pending_tasks() {
+        let results = vec![
+            RepoResult {
+                repo: "a/empty".into(),
+                status: RepoStatus::Items(vec![]),
+            },
+            RepoResult {
+                repo: "a/timeout".into(),
+                status: RepoStatus::Error(RepoError::Timeout),
+            },
+        ];
+        let out = render_inner(&results, false, 80);
+        assert!(out.contains("2 projects attempted, 0 with pending tasks, 1 failed"));
+        assert!(out.contains("timeout after 30s"));
     }
 
     #[test]

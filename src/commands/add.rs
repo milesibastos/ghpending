@@ -1,15 +1,24 @@
-use anyhow::{Result, bail};
+use std::{future::Future, time::Duration};
+
+use anyhow::{Context, Result, bail};
 use inquire::{MultiSelect, Text};
 use octocrab::Octocrab;
+use tokio::time::timeout;
 
 use crate::github::ListSource;
 use crate::{config, github};
+
+const API_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub async fn run(crab: &Octocrab, user: Option<String>, all: bool) -> Result<()> {
     let mut cfg = config::load()?;
 
     let found = if all {
-        github::list_authenticated_repos(crab).await?
+        with_api_timeout(
+            github::list_authenticated_repos(crab),
+            "listing repositories timed out after 30s",
+        )
+        .await?
     } else {
         let username = match resolve_user(user, cfg.user.clone()) {
             UserChoice::Override(u) => {
@@ -30,10 +39,33 @@ pub async fn run(crab: &Octocrab, user: Option<String>, all: bool) -> Result<()>
             UserChoice::Blank => bail!("--user cannot be empty"),
         };
 
-        match github::resolve_source_for(crab, &username).await? {
-            ListSource::Authenticated => github::list_authenticated_repos(crab).await?,
-            ListSource::Org(org) => github::list_org_repos(crab, &org).await?,
-            ListSource::PublicUser(u) => github::list_user_repos(crab, &u).await?,
+        match with_api_timeout(
+            github::resolve_source_for(crab, &username),
+            "resolving repository source timed out after 30s",
+        )
+        .await?
+        {
+            ListSource::Authenticated => {
+                with_api_timeout(
+                    github::list_authenticated_repos(crab),
+                    "listing repositories timed out after 30s",
+                )
+                .await?
+            }
+            ListSource::Org(org) => {
+                with_api_timeout(
+                    github::list_org_repos(crab, &org),
+                    "listing repositories timed out after 30s",
+                )
+                .await?
+            }
+            ListSource::PublicUser(u) => {
+                with_api_timeout(
+                    github::list_user_repos(crab, &u),
+                    "listing repositories timed out after 30s",
+                )
+                .await?
+            }
         }
     };
 
@@ -74,6 +106,13 @@ pub async fn run(crab: &Octocrab, user: Option<String>, all: bool) -> Result<()>
     config::save(&cfg)?;
     println!("Saved. Tracking {} repo(s) total.", cfg.repos.len());
     Ok(())
+}
+
+async fn with_api_timeout<T>(
+    future: impl Future<Output = Result<T>>,
+    message: &'static str,
+) -> Result<T> {
+    timeout(API_TIMEOUT, future).await.context(message)?
 }
 
 /// Which GitHub user/org `add` should list repos from, decided from the
