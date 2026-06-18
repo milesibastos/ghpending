@@ -12,6 +12,7 @@ pub struct RepoItem {
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub author: String,
+    pub pr_draft: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -313,18 +314,21 @@ async fn fetch_items_inner(
             title: issue.title,
             created_at,
             author,
+            pr_draft: None,
         });
     }
 
     for pr in all_prs {
         let author = pr.user.login.clone();
         let created_at = pr.created_at;
+        let pr_draft = pr.draft;
         items.push(RepoItem {
             kind: ItemKind::PullRequest,
             number: pr.number,
             title: pr.title,
             created_at,
             author,
+            pr_draft,
         });
     }
 
@@ -345,6 +349,7 @@ mod tests {
             title: format!("item {number}"),
             created_at: Utc::now(),
             author: "user".into(),
+            pr_draft: None,
         }
     }
 

@@ -89,7 +89,11 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
                     body.push_str(&format!("  {kind_str}  {number_str}  {title_str}\n"));
 
                     let rel = relative_time(&item.created_at, &now);
-                    let meta = format!("opened {} ago by {}", rel, item.author);
+                    let mut meta = format!("opened {} ago by {}", rel, item.author);
+                    if let Some(state) = pr_state_label(item) {
+                        meta.push_str(" · ");
+                        meta.push_str(state);
+                    }
                     let meta_colored = paint(&meta, color, |s| format!("{}", s.dimmed()));
                     body.push_str(&format!("        {meta_colored}\n"));
                 }
@@ -111,6 +115,17 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
     }
 }
 
+fn pr_state_label(item: &crate::github::RepoItem) -> Option<&'static str> {
+    match item.kind {
+        ItemKind::PullRequest => match item.pr_draft {
+            Some(true) => Some("draft"),
+            Some(false) => Some("ready"),
+            None => None,
+        },
+        ItemKind::Issue => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +139,18 @@ mod tests {
             title: title.into(),
             created_at,
             author: "testuser".into(),
+            pr_draft: None,
+        }
+    }
+
+    fn make_pr(number: u64, title: &str, draft: Option<bool>) -> RepoItem {
+        RepoItem {
+            kind: ItemKind::PullRequest,
+            number,
+            title: title.into(),
+            created_at: Utc::now(),
+            author: "testuser".into(),
+            pr_draft: draft,
         }
     }
 
@@ -185,6 +212,23 @@ mod tests {
         assert!(out.contains("ISS"));
         assert!(out.contains("#1840"));
         assert!(out.contains("testuser"));
+    }
+
+    #[test]
+    fn pull_request_draft_status_is_rendered_subtly() {
+        let results = vec![RepoResult {
+            repo: "owner/repo".into(),
+            status: RepoStatus::Items(vec![
+                make_pr(3, "Work in progress", Some(true)),
+                make_pr(2, "Ready for review", Some(false)),
+                make_pr(1, "Unknown state", None),
+            ]),
+        }];
+
+        let out = render_inner(&results, false, 80);
+        assert!(out.contains("opened just now ago by testuser · draft"));
+        assert!(out.contains("opened just now ago by testuser · ready"));
+        assert!(out.contains("opened just now ago by testuser\n"));
     }
 
     #[test]
