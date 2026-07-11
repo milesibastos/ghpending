@@ -324,6 +324,7 @@ mod tests {
     #[test]
     fn by_name_returns_some_for_known_themes() {
         assert!(Theme::by_name("default").is_some());
+        assert!(Theme::by_name("evangelion").is_some());
         assert!(Theme::by_name("nerv").is_some());
     }
 
@@ -351,5 +352,15 @@ mod tests {
         }];
         let out = render_inner(&results, &Theme::nerv(), false, 80);
         assert!(!out.contains("\x1b["));
+    }
+
+    #[test]
+    fn evangelion_theme_with_color_produces_ansi_escapes() {
+        let results = vec![RepoResult {
+            repo: "owner/repo".into(),
+            status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
+        }];
+        let out = render_inner(&results, &Theme::evangelion(), true, 80);
+        assert!(out.contains("\x1b["));
     }
 }

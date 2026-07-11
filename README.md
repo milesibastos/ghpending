@@ -107,7 +107,7 @@ Run `ghpending add --user <name>` to change the `user` field, or edit the file d
 
 ## Themes
 
-Pass `--theme nerv` on the command line (any subcommand) or set `theme = "nerv"` in the config file to switch to the Evangelion/NERV palette.
+Pass `--theme nerv` on the command line (any subcommand) or set `theme = "nerv"` in the config file to switch to the NERV interface palette. The older purple-accent Evangelion palette is still available as `evangelion`.
 
 ```toml
 user = "akitaonrails"

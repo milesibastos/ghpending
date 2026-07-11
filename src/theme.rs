@@ -1,6 +1,6 @@
 use owo_colors::{Style, XtermColors};
 
-pub const THEME_NAMES: &[&str] = &["default", "nerv"];
+pub const THEME_NAMES: &[&str] = &["default", "evangelion", "nerv"];
 
 pub struct Theme {
     pub repo: Style,
@@ -21,7 +21,7 @@ impl Theme {
         }
     }
 
-    pub fn nerv() -> Self {
+    pub fn evangelion() -> Self {
         Theme {
             repo: Style::new().bold().color(XtermColors::LighterHeliotrope),
             pr: Style::new().color(XtermColors::ChartreuseGreen),
@@ -31,9 +31,20 @@ impl Theme {
         }
     }
 
+    pub fn nerv() -> Self {
+        Theme {
+            repo: Style::new().bold().color(XtermColors::FlushOrange),
+            pr: Style::new().color(XtermColors::SpringGreen),
+            issue: Style::new().color(XtermColors::YellowSea),
+            meta: Style::new().dimmed().color(XtermColors::BondiBlue),
+            error: Style::new().bold().color(XtermColors::Red),
+        }
+    }
+
     pub fn by_name(name: &str) -> Option<Theme> {
         match name {
             "default" => Some(Theme::default_theme()),
+            "evangelion" => Some(Theme::evangelion()),
             "nerv" => Some(Theme::nerv()),
             _ => None,
         }
