@@ -18,12 +18,15 @@ async fn main() -> Result<()> {
 
     let cfg = config::load()?;
 
-    let theme_name = cli
-        .theme
-        .as_deref()
-        .or(cfg.theme.as_deref())
-        .unwrap_or("default");
-    let resolved_theme = match Theme::by_name(theme_name) {
+    let env_specific = std::env::var("GHPENDING_THEME").ok();
+    let env_generic = std::env::var("TCLOCK_WIDGET_THEME").ok();
+    let theme_name = theme::resolve_name(
+        cli.theme.as_deref(),
+        env_specific.as_deref(),
+        env_generic.as_deref(),
+        cfg.theme.as_deref(),
+    );
+    let resolved_theme = match Theme::by_name(&theme_name) {
         Some(t) => t,
         None => bail!(
             "unknown theme: {} (available: {})",

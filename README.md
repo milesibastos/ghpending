@@ -107,13 +107,17 @@ Run `ghpending add --user <name>` to change the `user` field, or edit the file d
 
 ## Themes
 
-Pass `--theme nerv` on the command line (any subcommand) or set `theme = "nerv"` in the config file to switch to the Evangelion/NERV palette. The flag takes priority over the config field when both are set.
+Pass `--theme nerv` on the command line (any subcommand) or set `theme = "nerv"` in the config file to switch to the Evangelion/NERV palette.
 
 ```toml
 user = "akitaonrails"
 repos = ["ratatui-org/ratatui"]
 theme = "nerv"
 ```
+
+The environment variables `GHPENDING_THEME` (specific) and `TCLOCK_WIDGET_THEME` (generic, set by [tclock](https://github.com/akitaonrails/clock-tui) for its widget subprocesses) are also honored, so running ghpending as a tclock widget follows the clock's theme cycling automatically.
+
+Precedence: `--theme` flag, then `GHPENDING_THEME`, then `TCLOCK_WIDGET_THEME`, then the config file, then `default`. An unknown name in an env var is skipped with a warning; an unknown name in the flag is an error.
 
 ## License
 
