@@ -7,12 +7,13 @@ use octocrab::Octocrab;
 use tokio::time::{self, timeout};
 
 use crate::github::{RepoError, RepoResult, RepoStatus};
+use crate::theme::Theme;
 use crate::{config, display, github};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONCURRENT_FETCHES: usize = 4;
 
-pub async fn run(crab: &Octocrab) -> Result<()> {
+pub async fn run(crab: &Octocrab, theme: &Theme) -> Result<()> {
     let cfg = config::load()?;
 
     if cfg.repos.is_empty() {
@@ -33,7 +34,7 @@ pub async fn run(crab: &Octocrab) -> Result<()> {
 
     spinner.finish_and_clear();
 
-    let digest = display::render_digest(&results);
+    let digest = display::render_digest(&results, theme);
     print!("{digest}");
 
     if all_repo_fetches_failed(&results) {

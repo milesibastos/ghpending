@@ -8,6 +8,8 @@ pub struct Config {
     pub user: Option<String>,
     #[serde(default)]
     pub repos: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
 }
 
 fn config_path() -> Result<PathBuf> {
@@ -57,6 +59,7 @@ mod tests {
         let cfg = Config {
             user: Some("octocat".into()),
             repos: vec!["owner/repo".into(), "foo/bar".into()],
+            theme: None,
         };
         let s = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
@@ -69,6 +72,7 @@ mod tests {
         let cfg = Config {
             user: None,
             repos: vec!["owner/repo".into()],
+            theme: None,
         };
         let s = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
@@ -81,5 +85,31 @@ mod tests {
         let cfg: Config = toml::from_str("").unwrap();
         assert!(cfg.user.is_none());
         assert!(cfg.repos.is_empty());
+        assert!(cfg.theme.is_none());
+    }
+
+    #[test]
+    fn round_trip_with_theme() {
+        let cfg = Config {
+            user: Some("octocat".into()),
+            repos: vec!["owner/repo".into()],
+            theme: Some("nerv".into()),
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(back.theme.as_deref(), Some("nerv"));
+    }
+
+    #[test]
+    fn round_trip_theme_none_omitted() {
+        let cfg = Config {
+            user: None,
+            repos: vec![],
+            theme: None,
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        assert!(!s.contains("theme"));
+        let back: Config = toml::from_str(&s).unwrap();
+        assert!(back.theme.is_none());
     }
 }

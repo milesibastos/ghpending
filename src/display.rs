@@ -1,9 +1,10 @@
 use chrono::Utc;
-use owo_colors::OwoColorize;
+use owo_colors::Style;
 use terminal_size::{Width, terminal_size};
 
 use crate::format::{relative_time, truncate_title};
 use crate::github::{ItemKind, RepoResult, RepoStatus};
+use crate::theme::Theme;
 
 fn term_width() -> usize {
     terminal_size().map_or(80, |(Width(w), _)| w as usize)
@@ -13,16 +14,19 @@ fn should_colorize() -> bool {
     std::env::var("NO_COLOR").is_err()
 }
 
-/// Apply a color style only when `color` is true; otherwise return the text as-is.
-fn paint<'a>(text: &'a str, color: bool, style: impl FnOnce(&'a str) -> String) -> String {
-    if color { style(text) } else { text.to_owned() }
+fn paint(text: &str, color: bool, style: Style) -> String {
+    if color {
+        style.style(text).to_string()
+    } else {
+        text.to_owned()
+    }
 }
 
-pub fn render_digest(results: &[RepoResult]) -> String {
-    render_inner(results, should_colorize(), term_width())
+pub fn render_digest(results: &[RepoResult], theme: &Theme) -> String {
+    render_inner(results, theme, should_colorize(), term_width())
 }
 
-fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
+fn render_inner(results: &[RepoResult], theme: &Theme, color: bool, width: usize) -> String {
     if results.is_empty() {
         return "No repos tracked. Run `ghpending add` to get started.\n".into();
     }
@@ -51,20 +55,16 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
         }
         shown += 1;
 
-        let repo_colored = paint(&result.repo, color, |s| format!("{}", s.bold().cyan()));
+        let repo_colored = paint(&result.repo, color, theme.repo);
         body.push_str(&format!("━━ {repo_colored}\n"));
 
         match &result.status {
             RepoStatus::NotFound => {
-                let msg = paint("(not found or no access)", color, |s| {
-                    format!("{}", s.dimmed())
-                });
+                let msg = paint("(not found or no access)", color, theme.meta);
                 body.push_str(&format!("  {msg}\n"));
             }
             RepoStatus::Error(e) => {
-                let msg = paint(&format!("(error: {e})"), color, |s| {
-                    format!("{}", s.red().dimmed())
-                });
+                let msg = paint(&format!("(error: {e})"), color, theme.error);
                 body.push_str(&format!("  {msg}\n"));
             }
             RepoStatus::Items(items) => {
@@ -73,13 +73,13 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
                 for item in items {
                     let (kind_str, number_str, title_str) = match item.kind {
                         ItemKind::PullRequest => {
-                            let ks = paint("PR ", color, |s| format!("{}", s.magenta()));
+                            let ks = paint("PR ", color, theme.pr);
                             let ns = format!("#{}", item.number);
                             let title = truncate_title(&item.title, title_max);
                             (ks, ns, title)
                         }
                         ItemKind::Issue => {
-                            let ks = paint("ISS", color, |s| format!("{}", s.yellow()));
+                            let ks = paint("ISS", color, theme.issue);
                             let ns = format!("#{}", item.number);
                             let title = truncate_title(&item.title, title_max);
                             (ks, ns, title)
@@ -94,7 +94,7 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
                         meta.push_str(" · ");
                         meta.push_str(state);
                     }
-                    let meta_colored = paint(&meta, color, |s| format!("{}", s.dimmed()));
+                    let meta_colored = paint(&meta, color, theme.meta);
                     body.push_str(&format!("        {meta_colored}\n"));
                 }
             }
@@ -106,7 +106,7 @@ fn render_inner(results: &[RepoResult], color: bool, width: usize) -> String {
     } else {
         format!("{total} projects checked, {with_pending} with pending tasks")
     };
-    let summary_colored = paint(&summary, color, |s| format!("{}", s.dimmed()));
+    let summary_colored = paint(&summary, color, theme.meta);
 
     if body.is_empty() {
         format!("{summary_colored}\n")
@@ -130,6 +130,7 @@ fn pr_state_label(item: &crate::github::RepoItem) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::github::{ItemKind, RepoError, RepoItem, RepoResult, RepoStatus};
+    use crate::theme::Theme;
 
     fn make_item(kind: ItemKind, number: u64, title: &str, days_ago: i64) -> RepoItem {
         let created_at = Utc::now() - chrono::Duration::days(days_ago);
@@ -156,7 +157,7 @@ mod tests {
 
     #[test]
     fn no_repos_tracked() {
-        let out = render_inner(&[], false, 80);
+        let out = render_inner(&[], &Theme::default_theme(), false, 80);
         assert!(out.contains("ghpending add"));
     }
 
@@ -166,7 +167,7 @@ mod tests {
             repo: "owner/empty".into(),
             status: RepoStatus::Items(vec![]),
         }];
-        let out = render_inner(&results, false, 80);
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
         assert!(!out.contains("owner/empty"));
         assert!(!out.contains("nothing pending"));
         assert!(out.contains("1 projects checked, 0 with pending tasks"));
@@ -178,7 +179,7 @@ mod tests {
             repo: "owner/missing".into(),
             status: RepoStatus::NotFound,
         }];
-        let out = render_inner(&results, false, 80);
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
         assert!(out.contains("owner/missing"));
         assert!(out.contains("not found or no access"));
     }
@@ -189,7 +190,7 @@ mod tests {
             repo: "owner/flaky".into(),
             status: RepoStatus::Error(RepoError::Api("rate limited".into())),
         }];
-        let out = render_inner(&results, false, 80);
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
         assert!(out.contains("owner/flaky"));
         assert!(out.contains("error:"));
         assert!(out.contains("rate limited"));
@@ -204,7 +205,7 @@ mod tests {
                 make_item(ItemKind::Issue, 1840, "Crash on empty Paragraph", 0),
             ]),
         }];
-        let out = render_inner(&results, false, 80);
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
         assert!(out.contains("ratatui-org/ratatui"));
         assert!(out.contains("PR"));
         assert!(out.contains("#1842"));
@@ -225,7 +226,7 @@ mod tests {
             ]),
         }];
 
-        let out = render_inner(&results, false, 80);
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
         assert!(out.contains("opened just now ago by testuser · draft"));
         assert!(out.contains("opened just now ago by testuser · ready"));
         assert!(out.contains("opened just now ago by testuser\n"));
@@ -237,7 +238,7 @@ mod tests {
             repo: "a/b".into(),
             status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
         }];
-        let out = render_inner(&results, false, 80);
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
         let header_line = out.lines().find(|l| l.contains("━━")).unwrap();
         assert_eq!(header_line, "━━ a/b");
     }
@@ -254,7 +255,7 @@ mod tests {
                 status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 2, "y", 0)]),
             },
         ];
-        let out = render_inner(&results, false, 80);
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
         let body = out.split_once("\n\n").unwrap().1;
         assert!(body.contains("\n\n"));
     }
@@ -279,7 +280,7 @@ mod tests {
                 status: RepoStatus::Error(RepoError::Api("rate limited".into())),
             },
         ];
-        let out = render_inner(&results, false, 80);
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
         assert!(out.contains("4 projects attempted, 1 with pending tasks, 1 failed"));
         assert!(!out.contains("a/empty"));
         assert!(out.contains("a/withitems"));
@@ -299,7 +300,7 @@ mod tests {
                 status: RepoStatus::Error(RepoError::Timeout),
             },
         ];
-        let out = render_inner(&results, false, 80);
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
         assert!(out.contains("2 projects attempted, 0 with pending tasks, 1 failed"));
         assert!(out.contains("timeout after 30s"));
     }
@@ -316,7 +317,39 @@ mod tests {
                 status: RepoStatus::Items(vec![]),
             },
         ];
-        let out = render_inner(&results, false, 80);
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
         assert_eq!(out, "2 projects checked, 0 with pending tasks\n");
+    }
+
+    #[test]
+    fn by_name_returns_some_for_known_themes() {
+        assert!(Theme::by_name("default").is_some());
+        assert!(Theme::by_name("nerv").is_some());
+    }
+
+    #[test]
+    fn by_name_returns_none_for_unknown_theme() {
+        assert!(Theme::by_name("matrix").is_none());
+        assert!(Theme::by_name("").is_none());
+    }
+
+    #[test]
+    fn nerv_theme_with_color_produces_ansi_escapes() {
+        let results = vec![RepoResult {
+            repo: "owner/repo".into(),
+            status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
+        }];
+        let out = render_inner(&results, &Theme::nerv(), true, 80);
+        assert!(out.contains("\x1b["));
+    }
+
+    #[test]
+    fn nerv_theme_without_color_has_no_ansi_escapes() {
+        let results = vec![RepoResult {
+            repo: "owner/repo".into(),
+            status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
+        }];
+        let out = render_inner(&results, &Theme::nerv(), false, 80);
+        assert!(!out.contains("\x1b["));
     }
 }

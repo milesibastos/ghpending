@@ -105,6 +105,16 @@ repos = ["ratatui-org/ratatui", "tokio-rs/tokio"]
 
 Run `ghpending add --user <name>` to change the `user` field, or edit the file directly to reorder repos.
 
+## Themes
+
+Pass `--theme nerv` on the command line (any subcommand) or set `theme = "nerv"` in the config file to switch to the Evangelion/NERV palette. The flag takes priority over the config field when both are set.
+
+```toml
+user = "akitaonrails"
+repos = ["ratatui-org/ratatui"]
+theme = "nerv"
+```
+
 ## License
 
 MIT

@@ -8,6 +8,9 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+    /// Color theme (default, nerv)
+    #[arg(long, global = true)]
+    pub theme: Option<String>,
 }
 
 #[derive(Subcommand)]

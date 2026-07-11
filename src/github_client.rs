@@ -99,7 +99,7 @@ struct ProxyChoice {
 }
 
 fn proxy_from_environment_or_local_port() -> Result<Option<ProxyChoice>> {
-    if let Some(raw) = std::env::var("GHPENDING_GITHUB_PROXY").ok() {
+    if let Ok(raw) = std::env::var("GHPENDING_GITHUB_PROXY") {
         return Ok(Some(ProxyChoice {
             uri: normalize_required_socks_proxy_uri("GHPENDING_GITHUB_PROXY", raw.trim())?,
             strict: true,
