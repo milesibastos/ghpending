@@ -64,6 +64,8 @@ ghpending add                # pick repos from the saved user/org to track
 ghpending add --user <name>  # switch to a different user/org (replaces the saved one)
 ghpending add --all          # pick from every repo your token can reach (private included)
 ghpending        # print the digest
+ghpending --author <login>                  # only items authored by this user
+ghpending --review-requested <login>        # only PRs awaiting this user
 ghpending list   # show tracked repos
 ghpending rm     # remove repos from the list
 ```
@@ -118,6 +120,38 @@ Precedence (highest first): `--config <path>` flag, then the `GHPENDING_CONFIG`
 environment variable, then the nearest `.ghpending.toml`, then the global config.
 The flag and env var take a path directly and bypass the walk-up search — handy
 for scripting or pointing at a throwaway config.
+
+### Filtering the digest
+
+Filter the digest to items authored by particular users or PRs currently
+awaiting review. These are current review requests, not users who submitted a
+review in the past.
+
+```toml
+[filters]
+authors = ["alice"]
+review_requested = ["bob", "team:my-org/backend"]
+match = "any"
+```
+
+Values are case-insensitive. Multiple values within one role match any listed
+value. `match = "any"` (the default) includes an item matching either enabled
+role; `match = "all"` requires every enabled role. Issues can match authors but
+not review requests. Team requests must be explicit as `team:ORG/SLUG` — a
+request to a team is not treated as a request to every individual member.
+
+For one-off filtering, repeat the CLI options as needed:
+
+```sh
+ghpending --author alice --author bob
+ghpending --review-requested bob
+ghpending --author alice --review-requested bob --match all
+```
+
+If either CLI role option is present, the CLI author and review-request lists
+replace both configured role lists for that invocation. The configured matching
+mode remains in effect unless `--match` overrides it. PR output includes a
+`review requested:` segment showing current user and team requests.
 
 ## Themes
 

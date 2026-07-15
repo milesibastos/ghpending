@@ -16,6 +16,10 @@ use theme::Theme;
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    if cli.command.is_some() && cli.has_digest_filter_args() {
+        bail!("--author, --review-requested, and --match only apply to the digest");
+    }
+
     let (cfg_path, cfg_source) = config::resolve_path(cli.config.as_deref())?;
     if cfg_source != config::ConfigSource::Global {
         eprintln!("using config {}", cfg_path.display());
@@ -47,7 +51,17 @@ async fn main() -> Result<()> {
         Some(Commands::Add { user, all }) => {
             commands::add::run(&crab, user.clone(), *all, &cfg_path).await?
         }
-        None => commands::digest::run(&crab, &resolved_theme, &cfg_path).await?,
+        None => {
+            commands::digest::run(
+                &crab,
+                &resolved_theme,
+                &cfg_path,
+                &cli.authors,
+                &cli.review_requested,
+                cli.filter_mode,
+            )
+            .await?
+        }
     }
 
     Ok(())

@@ -4,7 +4,7 @@ use terminal_size::{Width, terminal_size};
 
 use crate::format::{relative_time, truncate_title};
 use crate::github::{
-    CodexReaction, ItemKind, PrExtra, RepoResult, RepoStatus, ReviewDecision, ReviewState,
+    CodexReaction, ItemKind, PrExtra, RepoItem, RepoResult, RepoStatus, ReviewDecision, ReviewState,
 };
 use crate::theme::Theme;
 
@@ -24,11 +24,22 @@ fn paint(text: &str, color: bool, style: Style) -> String {
     }
 }
 
-pub fn render_digest(results: &[RepoResult], theme: &Theme) -> String {
-    render_inner(results, theme, should_colorize(), term_width())
+pub fn render_digest(results: &[RepoResult], theme: &Theme, filtered: bool) -> String {
+    render_inner_filtered(results, theme, should_colorize(), term_width(), filtered)
 }
 
+#[cfg(test)]
 fn render_inner(results: &[RepoResult], theme: &Theme, color: bool, width: usize) -> String {
+    render_inner_filtered(results, theme, color, width, false)
+}
+
+fn render_inner_filtered(
+    results: &[RepoResult],
+    theme: &Theme,
+    color: bool,
+    width: usize,
+    filtered: bool,
+) -> String {
     if results.is_empty() {
         return "No repos tracked. Run `ghpending add` to get started.\n".into();
     }
@@ -99,9 +110,7 @@ fn render_inner(results: &[RepoResult], theme: &Theme, color: bool, width: usize
                     let meta_colored = paint(&meta, color, theme.meta);
                     body.push_str(&format!("        {meta_colored}\n"));
 
-                    if let Some(extra) = &item.pr_extra
-                        && let Some(line) = pr_extra_line(extra)
-                    {
+                    if let Some(line) = pr_detail_line(item) {
                         let line_colored = paint(&line, color, theme.meta);
                         body.push_str(&format!("        {line_colored}\n"));
                     }
@@ -110,10 +119,15 @@ fn render_inner(results: &[RepoResult], theme: &Theme, color: bool, width: usize
         }
     }
 
-    let summary = if failures > 0 {
-        format!("{total} projects attempted, {with_pending} with pending tasks, {failures} failed")
+    let task_label = if filtered {
+        "matching tasks"
     } else {
-        format!("{total} projects checked, {with_pending} with pending tasks")
+        "pending tasks"
+    };
+    let summary = if failures > 0 {
+        format!("{total} projects attempted, {with_pending} with {task_label}, {failures} failed")
+    } else {
+        format!("{total} projects checked, {with_pending} with {task_label}")
     };
     let summary_colored = paint(&summary, color, theme.meta);
 
@@ -124,7 +138,7 @@ fn render_inner(results: &[RepoResult], theme: &Theme, color: bool, width: usize
     }
 }
 
-fn pr_state_label(item: &crate::github::RepoItem) -> Option<&'static str> {
+fn pr_state_label(item: &RepoItem) -> Option<&'static str> {
     match item.kind {
         ItemKind::PullRequest => match item.pr_draft {
             Some(true) => Some("draft"),
@@ -132,6 +146,32 @@ fn pr_state_label(item: &crate::github::RepoItem) -> Option<&'static str> {
             None => None,
         },
         ItemKind::Issue => None,
+    }
+}
+
+fn pr_detail_line(item: &RepoItem) -> Option<String> {
+    let mut segs = Vec::new();
+
+    if !item.requested_reviewers.is_empty() || !item.requested_teams.is_empty() {
+        let mut requested = item.requested_reviewers.clone();
+        requested.extend(
+            item.requested_teams
+                .iter()
+                .map(|team| format!("team:{team}")),
+        );
+        segs.push(format!("review requested: {}", requested.join(", ")));
+    }
+
+    if let Some(extra) = &item.pr_extra
+        && let Some(line) = pr_extra_line(extra)
+    {
+        segs.push(line);
+    }
+
+    if segs.is_empty() {
+        None
+    } else {
+        Some(segs.join(" · "))
     }
 }
 
@@ -206,6 +246,8 @@ mod tests {
             title: title.into(),
             created_at,
             author: "testuser".into(),
+            requested_reviewers: vec![],
+            requested_teams: vec![],
             pr_draft: None,
             pr_extra: None,
         }
@@ -218,6 +260,8 @@ mod tests {
             title: title.into(),
             created_at: Utc::now(),
             author: "testuser".into(),
+            requested_reviewers: vec![],
+            requested_teams: vec![],
             pr_draft: draft,
             pr_extra: None,
         }
@@ -230,6 +274,8 @@ mod tests {
             title: "PR title".into(),
             created_at: Utc::now(),
             author: "testuser".into(),
+            requested_reviewers: vec![],
+            requested_teams: vec![],
             pr_draft: Some(false),
             pr_extra: Some(extra),
         }
@@ -378,6 +424,20 @@ mod tests {
     }
 
     #[test]
+    fn requested_users_and_teams_render_without_graphql_extra() {
+        let mut pr = make_pr(1, "Needs review", Some(false));
+        pr.requested_reviewers = vec!["alice".into()];
+        pr.requested_teams = vec!["owner/backend".into()];
+        let results = vec![RepoResult {
+            repo: "owner/repo".into(),
+            status: RepoStatus::Items(vec![pr]),
+        }];
+
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
+        assert!(out.contains("review requested: alice, team:owner/backend"));
+    }
+
+    #[test]
     fn pr_without_extra_has_no_third_line() {
         let results = vec![RepoResult {
             repo: "a/b".into(),
@@ -487,6 +547,17 @@ mod tests {
         ];
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
         assert_eq!(out, "2 projects checked, 0 with pending tasks\n");
+    }
+
+    #[test]
+    fn filtered_summary_describes_matching_tasks() {
+        let results = vec![RepoResult {
+            repo: "a/b".into(),
+            status: RepoStatus::Items(vec![]),
+        }];
+        let out = render_inner_filtered(&results, &Theme::default_theme(), false, 80, true);
+
+        assert_eq!(out, "1 projects checked, 0 with matching tasks\n");
     }
 
     #[test]
