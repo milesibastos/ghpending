@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::{future::Future, time::Duration};
 
 use anyhow::{Context, Result, bail};
@@ -10,8 +11,8 @@ use crate::{config, github};
 
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub async fn run(crab: &Octocrab, user: Option<String>, all: bool) -> Result<()> {
-    let mut cfg = config::load()?;
+pub async fn run(crab: &Octocrab, user: Option<String>, all: bool, cfg_path: &Path) -> Result<()> {
+    let mut cfg = config::load_from(cfg_path)?;
 
     let found = if all {
         with_api_timeout(
@@ -23,7 +24,7 @@ pub async fn run(crab: &Octocrab, user: Option<String>, all: bool) -> Result<()>
         let username = match resolve_user(user, cfg.user.clone()) {
             UserChoice::Override(u) => {
                 cfg.user = Some(u.clone());
-                config::save(&cfg)?;
+                config::save_to(&cfg, cfg_path)?;
                 u
             }
             UserChoice::Saved(u) => u,
@@ -33,7 +34,7 @@ pub async fn run(crab: &Octocrab, user: Option<String>, all: bool) -> Result<()>
                     .trim()
                     .to_owned();
                 cfg.user = Some(u.clone());
-                config::save(&cfg)?;
+                config::save_to(&cfg, cfg_path)?;
                 u
             }
             UserChoice::Blank => bail!("--user cannot be empty"),
@@ -103,7 +104,7 @@ pub async fn run(crab: &Octocrab, user: Option<String>, all: bool) -> Result<()>
         }
     }
     cfg.repos.sort();
-    config::save(&cfg)?;
+    config::save_to(&cfg, cfg_path)?;
     println!("Saved. Tracking {} repo(s) total.", cfg.repos.len());
     Ok(())
 }

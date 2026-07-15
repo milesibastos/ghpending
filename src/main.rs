@@ -16,7 +16,11 @@ use theme::Theme;
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let cfg = config::load()?;
+    let (cfg_path, cfg_source) = config::resolve_path(cli.config.as_deref())?;
+    if cfg_source != config::ConfigSource::Global {
+        eprintln!("using config {}", cfg_path.display());
+    }
+    let cfg = config::load_from(&cfg_path)?;
 
     let env_specific = std::env::var("GHPENDING_THEME").ok();
     let env_generic = std::env::var("TCLOCK_WIDGET_THEME").ok();
@@ -38,10 +42,12 @@ async fn main() -> Result<()> {
     let crab = github_client::build()?;
 
     match &cli.command {
-        Some(Commands::List) => commands::list::run()?,
-        Some(Commands::Rm) => commands::remove::run()?,
-        Some(Commands::Add { user, all }) => commands::add::run(&crab, user.clone(), *all).await?,
-        None => commands::digest::run(&crab, &resolved_theme).await?,
+        Some(Commands::List) => commands::list::run(&cfg_path)?,
+        Some(Commands::Rm) => commands::remove::run(&cfg_path)?,
+        Some(Commands::Add { user, all }) => {
+            commands::add::run(&crab, user.clone(), *all, &cfg_path).await?
+        }
+        None => commands::digest::run(&crab, &resolved_theme, &cfg_path).await?,
     }
 
     Ok(())

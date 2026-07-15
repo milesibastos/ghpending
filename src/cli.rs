@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -11,6 +12,9 @@ pub struct Cli {
     /// Color theme (default, evangelion, nerv)
     #[arg(long, global = true)]
     pub theme: Option<String>,
+    /// Use a specific config file, bypassing local/global discovery
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
