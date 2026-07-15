@@ -1,11 +1,17 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use octocrab::Octocrab;
 use serde::Deserialize;
 use thiserror::Error;
+
+/// Enrichment is bounded on its own, well under the digest's 30s per-repo
+/// deadline, so a slow GraphQL endpoint can never consume the whole budget and
+/// discard the REST items that already resolved.
+const ENRICH_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// The login of the OpenAI Codex review bot. It surfaces as
 /// `chatgpt-codex-connector[bot]` on reactions but `chatgpt-codex-connector`
@@ -485,10 +491,14 @@ async fn fetch_items_inner(
     // Sort: PRs first, then issues; within each group by number descending
     items.sort_by(item_cmp);
 
-    // Best-effort GraphQL enrichment for PRs. A failure here must never
-    // downgrade the REST result, so a fetch error just leaves `pr_extra` None.
+    // Best-effort GraphQL enrichment for PRs. A failure *or timeout* here must
+    // never downgrade the REST result: enrichment is bounded separately
+    // (`ENRICH_TIMEOUT`) so a hung GraphQL call cannot burn the digest's whole
+    // per-repo deadline and turn the completed REST fetch into a timeout. On
+    // either error the items simply keep `pr_extra` None.
     if items.iter().any(|i| i.kind == ItemKind::PullRequest)
-        && let Ok(extras) = fetch_pr_extras(crab, owner, name).await
+        && let Ok(Ok(extras)) =
+            tokio::time::timeout(ENRICH_TIMEOUT, fetch_pr_extras(crab, owner, name)).await
     {
         for item in &mut items {
             if item.kind == ItemKind::PullRequest {
@@ -514,11 +524,11 @@ query($owner:String!, $name:String!) {
       nodes {
         number
         reviewDecision
-        reactions(first:20) { nodes { content user { login } } }
+        reactions(first:100) { nodes { content user { login } } }
         reviewThreads(first:100) {
           nodes { isResolved comments(first:1) { nodes { author { login } } } }
         }
-        latestReviews(first:50) { nodes { author { login } state } }
+        latestReviews(first:100) { nodes { author { login } state } }
       }
     }
   }
