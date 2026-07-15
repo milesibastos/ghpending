@@ -91,7 +91,7 @@ If a SOCKS proxy is already listening at `127.0.0.1:9050`, `ghpending` uses it f
 
 ## Config
 
-The config file lives at:
+The global config file lives at:
 
 - Linux: `~/.config/ghpending/config.toml`
 - macOS: `~/Library/Application Support/ghpending/config.toml`
@@ -104,6 +104,20 @@ repos = ["ratatui-org/ratatui", "tokio-rs/tokio"]
 ```
 
 Run `ghpending add --user <name>` to change the `user` field, or edit the file directly to reorder repos.
+
+### Per-project config
+
+Drop a `.ghpending.toml` in a project (same format as above) to watch a
+different repo set while you're inside that directory. ghpending walks up from
+the current directory to the git root looking for it, so it works from any
+subfolder. The local file **fully replaces** the global one — `add`/`rm` write
+to whichever file is active, and a `using config <path>` note is printed to
+stderr so you know which one is in effect.
+
+Precedence (highest first): `--config <path>` flag, then the `GHPENDING_CONFIG`
+environment variable, then the nearest `.ghpending.toml`, then the global config.
+The flag and env var take a path directly and bypass the walk-up search — handy
+for scripting or pointing at a throwaway config.
 
 ## Themes
 
