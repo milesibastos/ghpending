@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -12,6 +13,42 @@ pub struct Config {
     pub repos: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Filters::is_default")]
+    pub filters: Filters,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct Filters {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_requested: Vec<String>,
+    #[serde(default, rename = "match", skip_serializing_if = "FilterMode::is_any")]
+    pub mode: FilterMode,
+}
+
+impl Filters {
+    pub fn is_empty(&self) -> bool {
+        self.authors.is_empty() && self.review_requested.is_empty()
+    }
+
+    fn is_default(&self) -> bool {
+        self.is_empty() && self.mode == FilterMode::Any
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum FilterMode {
+    #[default]
+    Any,
+    All,
+}
+
+impl FilterMode {
+    fn is_any(&self) -> bool {
+        *self == Self::Any
+    }
 }
 
 /// Where the active config came from, in precedence order.
@@ -119,6 +156,7 @@ mod tests {
             user: Some("octocat".into()),
             repos: vec!["owner/repo".into(), "foo/bar".into()],
             theme: None,
+            filters: Filters::default(),
         };
         let s = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
@@ -132,6 +170,7 @@ mod tests {
             user: None,
             repos: vec!["owner/repo".into()],
             theme: None,
+            filters: Filters::default(),
         };
         let s = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
@@ -145,6 +184,7 @@ mod tests {
         assert!(cfg.user.is_none());
         assert!(cfg.repos.is_empty());
         assert!(cfg.theme.is_none());
+        assert!(cfg.filters.is_empty());
     }
 
     #[test]
@@ -153,6 +193,7 @@ mod tests {
             user: Some("octocat".into()),
             repos: vec!["owner/repo".into()],
             theme: Some("nerv".into()),
+            filters: Filters::default(),
         };
         let s = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
@@ -165,11 +206,54 @@ mod tests {
             user: None,
             repos: vec![],
             theme: None,
+            filters: Filters::default(),
         };
         let s = toml::to_string(&cfg).unwrap();
         assert!(!s.contains("theme"));
         let back: Config = toml::from_str(&s).unwrap();
         assert!(back.theme.is_none());
+    }
+
+    #[test]
+    fn round_trip_with_filters() {
+        let cfg = Config {
+            user: None,
+            repos: vec!["owner/repo".into()],
+            theme: None,
+            filters: Filters {
+                authors: vec!["alice".into()],
+                review_requested: vec!["bob".into(), "team:owner/core".into()],
+                mode: FilterMode::All,
+            },
+        };
+        let text = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+
+        assert_eq!(back.filters, cfg.filters);
+        assert!(text.contains("[filters]"));
+        assert!(text.contains("match = \"all\""));
+    }
+
+    #[test]
+    fn empty_filters_are_omitted() {
+        let text = toml::to_string(&Config::default()).unwrap();
+        assert!(!text.contains("[filters]"));
+    }
+
+    #[test]
+    fn non_default_mode_is_preserved_without_roles() {
+        let cfg = Config {
+            filters: Filters {
+                mode: FilterMode::All,
+                ..Filters::default()
+            },
+            ..Config::default()
+        };
+        let text = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+
+        assert_eq!(back.filters.mode, FilterMode::All);
+        assert!(text.contains("match = \"all\""));
     }
 
     #[test]

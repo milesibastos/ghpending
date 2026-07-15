@@ -25,6 +25,10 @@ pub struct RepoItem {
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub author: String,
+    /// Users currently requested to review this PR. Empty for issues.
+    pub requested_reviewers: Vec<String>,
+    /// Requested teams as `ORG/SLUG`. Empty for issues.
+    pub requested_teams: Vec<String>,
     pub pr_draft: Option<bool>,
     /// Best-effort GraphQL enrichment; `None` for issues and for PRs whose
     /// enrichment query failed or did not resolve them.
@@ -468,6 +472,8 @@ async fn fetch_items_inner(
             title: issue.title,
             created_at,
             author,
+            requested_reviewers: vec![],
+            requested_teams: vec![],
             pr_draft: None,
             pr_extra: None,
         });
@@ -477,12 +483,24 @@ async fn fetch_items_inner(
         let author = pr.user.login.clone();
         let created_at = pr.created_at;
         let pr_draft = pr.draft;
+        let requested_reviewers = pr
+            .requested_reviewers
+            .iter()
+            .map(|reviewer| reviewer.login.clone())
+            .collect();
+        let requested_teams = pr
+            .requested_teams
+            .iter()
+            .map(|team| format!("{owner}/{}", team.slug))
+            .collect();
         items.push(RepoItem {
             kind: ItemKind::PullRequest,
             number: pr.number,
             title: pr.title,
             created_at,
             author,
+            requested_reviewers,
+            requested_teams,
             pr_draft,
             pr_extra: None,
         });
@@ -681,6 +699,8 @@ mod tests {
             title: format!("item {number}"),
             created_at: Utc::now(),
             author: "user".into(),
+            requested_reviewers: vec![],
+            requested_teams: vec![],
             pr_draft: None,
             pr_extra: None,
         }
