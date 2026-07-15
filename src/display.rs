@@ -3,7 +3,9 @@ use owo_colors::Style;
 use terminal_size::{Width, terminal_size};
 
 use crate::format::{relative_time, truncate_title};
-use crate::github::{ItemKind, RepoResult, RepoStatus};
+use crate::github::{
+    CodexReaction, ItemKind, PrExtra, RepoResult, RepoStatus, ReviewDecision, ReviewState,
+};
 use crate::theme::Theme;
 
 fn term_width() -> usize {
@@ -96,6 +98,13 @@ fn render_inner(results: &[RepoResult], theme: &Theme, color: bool, width: usize
                     }
                     let meta_colored = paint(&meta, color, theme.meta);
                     body.push_str(&format!("        {meta_colored}\n"));
+
+                    if let Some(extra) = &item.pr_extra
+                        && let Some(line) = pr_extra_line(extra)
+                    {
+                        let line_colored = paint(&line, color, theme.meta);
+                        body.push_str(&format!("        {line_colored}\n"));
+                    }
                 }
             }
         }
@@ -126,10 +135,67 @@ fn pr_state_label(item: &crate::github::RepoItem) -> Option<&'static str> {
     }
 }
 
+/// The optional third line under a PR: Codex status, unresolved-thread
+/// attribution, and human review states. `None` when there is nothing to show.
+fn pr_extra_line(extra: &PrExtra) -> Option<String> {
+    let mut segs: Vec<String> = Vec::new();
+
+    match extra.codex {
+        Some(CodexReaction::Reviewing) => segs.push("codex 👀 reviewing".into()),
+        Some(CodexReaction::Lgtm) => segs.push("codex 👍 lgtm".into()),
+        None if extra.codex_reviewed => segs.push("codex commented".into()),
+        None => {}
+    }
+
+    if !extra.unresolved.is_empty() {
+        let total: u32 = extra.unresolved.iter().map(|(_, n)| n).sum();
+        let authors = extra
+            .unresolved
+            .iter()
+            .map(|(login, _)| login.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        segs.push(format!("{total} unresolved ({authors})"));
+    }
+
+    for (login, state) in &extra.reviews {
+        segs.push(format!("{login} {}", review_state_label(*state)));
+    }
+
+    if let Some(decision) = extra.decision {
+        segs.push(review_decision_label(decision).to_owned());
+    }
+
+    if segs.is_empty() {
+        None
+    } else {
+        Some(segs.join(" · "))
+    }
+}
+
+fn review_state_label(state: ReviewState) -> &'static str {
+    match state {
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes requested",
+        ReviewState::Commented => "commented",
+        ReviewState::Dismissed => "dismissed",
+    }
+}
+
+fn review_decision_label(decision: ReviewDecision) -> &'static str {
+    match decision {
+        ReviewDecision::Approved => "approved",
+        ReviewDecision::ChangesRequested => "changes requested",
+        ReviewDecision::ReviewRequired => "review required",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::{ItemKind, RepoError, RepoItem, RepoResult, RepoStatus};
+    use crate::github::{
+        CodexReaction, ItemKind, PrExtra, RepoError, RepoItem, RepoResult, RepoStatus, ReviewState,
+    };
     use crate::theme::Theme;
 
     fn make_item(kind: ItemKind, number: u64, title: &str, days_ago: i64) -> RepoItem {
@@ -141,6 +207,7 @@ mod tests {
             created_at,
             author: "testuser".into(),
             pr_draft: None,
+            pr_extra: None,
         }
     }
 
@@ -152,6 +219,19 @@ mod tests {
             created_at: Utc::now(),
             author: "testuser".into(),
             pr_draft: draft,
+            pr_extra: None,
+        }
+    }
+
+    fn make_pr_with_extra(number: u64, extra: PrExtra) -> RepoItem {
+        RepoItem {
+            kind: ItemKind::PullRequest,
+            number,
+            title: "PR title".into(),
+            created_at: Utc::now(),
+            author: "testuser".into(),
+            pr_draft: Some(false),
+            pr_extra: Some(extra),
         }
     }
 
@@ -230,6 +310,94 @@ mod tests {
         assert!(out.contains("opened just now ago by testuser · draft"));
         assert!(out.contains("opened just now ago by testuser · ready"));
         assert!(out.contains("opened just now ago by testuser\n"));
+    }
+
+    fn extra(codex: Option<CodexReaction>, codex_reviewed: bool) -> PrExtra {
+        PrExtra {
+            unresolved: vec![],
+            codex,
+            codex_reviewed,
+            reviews: vec![],
+            decision: None,
+        }
+    }
+
+    #[test]
+    fn codex_reviewing_and_lgtm_render() {
+        let results = vec![RepoResult {
+            repo: "a/b".into(),
+            status: RepoStatus::Items(vec![
+                make_pr_with_extra(2, extra(Some(CodexReaction::Reviewing), true)),
+                make_pr_with_extra(1, extra(Some(CodexReaction::Lgtm), true)),
+            ]),
+        }];
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
+        assert!(out.contains("codex 👀 reviewing"));
+        assert!(out.contains("codex 👍 lgtm"));
+    }
+
+    #[test]
+    fn codex_commented_fallback_when_reviewed_without_reaction() {
+        let results = vec![RepoResult {
+            repo: "a/b".into(),
+            status: RepoStatus::Items(vec![make_pr_with_extra(1, extra(None, true))]),
+        }];
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
+        assert!(out.contains("codex commented"));
+    }
+
+    #[test]
+    fn unresolved_lists_every_author_with_total() {
+        let mut e = extra(None, false);
+        e.unresolved = vec![
+            ("chatgpt-codex-connector".into(), 2),
+            ("alvarolopes".into(), 1),
+        ];
+        let results = vec![RepoResult {
+            repo: "a/b".into(),
+            status: RepoStatus::Items(vec![make_pr_with_extra(1, e)]),
+        }];
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
+        assert!(out.contains("3 unresolved (chatgpt-codex-connector, alvarolopes)"));
+    }
+
+    #[test]
+    fn human_review_states_render() {
+        let mut e = extra(None, false);
+        e.reviews = vec![
+            ("alice".into(), ReviewState::Approved),
+            ("bob".into(), ReviewState::ChangesRequested),
+        ];
+        let results = vec![RepoResult {
+            repo: "a/b".into(),
+            status: RepoStatus::Items(vec![make_pr_with_extra(1, e)]),
+        }];
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
+        assert!(out.contains("alice approved"));
+        assert!(out.contains("bob changes requested"));
+    }
+
+    #[test]
+    fn pr_without_extra_has_no_third_line() {
+        let results = vec![RepoResult {
+            repo: "a/b".into(),
+            status: RepoStatus::Items(vec![make_pr(1, "Plain PR", Some(false))]),
+        }];
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
+        // Two lines per item: the item line and the meta line, nothing more.
+        let lines: Vec<&str> = out.lines().filter(|l| l.starts_with("        ")).collect();
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn empty_extra_emits_no_third_line() {
+        let results = vec![RepoResult {
+            repo: "a/b".into(),
+            status: RepoStatus::Items(vec![make_pr_with_extra(1, extra(None, false))]),
+        }];
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
+        let lines: Vec<&str> = out.lines().filter(|l| l.starts_with("        ")).collect();
+        assert_eq!(lines.len(), 1);
     }
 
     #[test]
