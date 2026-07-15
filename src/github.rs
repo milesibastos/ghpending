@@ -1,9 +1,16 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use octocrab::Octocrab;
+use serde::Deserialize;
 use thiserror::Error;
+
+/// The login of the OpenAI Codex review bot. It surfaces as
+/// `chatgpt-codex-connector[bot]` on reactions but `chatgpt-codex-connector`
+/// on reviews, so match with [`is_codex_actor`], never `==`.
+const CODEX_LOGIN: &str = "chatgpt-codex-connector";
 
 #[derive(Debug, Clone)]
 pub struct RepoItem {
@@ -13,12 +20,153 @@ pub struct RepoItem {
     pub created_at: DateTime<Utc>,
     pub author: String,
     pub pr_draft: Option<bool>,
+    /// Best-effort GraphQL enrichment; `None` for issues and for PRs whose
+    /// enrichment query failed or did not resolve them.
+    pub pr_extra: Option<PrExtra>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ItemKind {
     PullRequest,
     Issue,
+}
+
+/// Extra PR-only signal fetched via GraphQL (review threads, reactions,
+/// reviews). Assembled from the pure helpers below so the wire shape stays at
+/// the edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrExtra {
+    /// Unresolved review threads attributed to their opening author, most
+    /// first. `(login, count)`.
+    pub unresolved: Vec<(String, u32)>,
+    /// Codex's current PR-body reaction, its live review status.
+    pub codex: Option<CodexReaction>,
+    /// Whether Codex authored any review — the "codex commented" fallback when
+    /// it has left no reaction.
+    pub codex_reviewed: bool,
+    /// Latest review state per non-Codex reviewer.
+    pub reviews: Vec<(String, ReviewState)>,
+    /// GitHub's rollup, populated only when an opinionated review or branch
+    /// protection forces it (usually `None` here).
+    pub decision: Option<ReviewDecision>,
+}
+
+/// Codex's PR-body reaction: 👀 while reviewing, 👍 once satisfied. Codex never
+/// submits an APPROVED review, so this is its only "lgtm" signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexReaction {
+    Reviewing,
+    Lgtm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewState {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Dismissed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewDecision {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+}
+
+/// Matches the Codex bot regardless of the `[bot]` suffix GitHub appends on
+/// reaction users but not review authors.
+pub fn is_codex_actor(login: &str) -> bool {
+    login.trim_end_matches("[bot]") == CODEX_LOGIN
+}
+
+/// Aggregates unresolved review threads by their opening comment's author,
+/// sorted by count descending then login for stable output.
+fn unresolved_by_author(threads: &[ThreadInfo]) -> Vec<(String, u32)> {
+    let mut counts: HashMap<&str, u32> = HashMap::new();
+    for thread in threads {
+        if thread.resolved {
+            continue;
+        }
+        if let Some(author) = &thread.opener {
+            *counts.entry(author.as_str()).or_insert(0) += 1;
+        }
+    }
+    let mut out: Vec<(String, u32)> = counts
+        .into_iter()
+        .map(|(login, count)| (login.to_owned(), count))
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
+/// Picks Codex's reaction, preferring 👍 (done) over 👀 (still reviewing) when
+/// both are somehow present.
+fn codex_reaction(reactions: &[ReactionInfo]) -> Option<CodexReaction> {
+    let mut found: Option<CodexReaction> = None;
+    for reaction in reactions {
+        if !is_codex_actor(&reaction.login) {
+            continue;
+        }
+        match reaction.content.as_str() {
+            "THUMBS_UP" => return Some(CodexReaction::Lgtm),
+            "EYES" => found = Some(CodexReaction::Reviewing),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Splits latest reviews into per-human-reviewer states (Codex excluded, since
+/// its status rides the reaction) and a flag for whether Codex reviewed at all.
+fn collapse_reviews(reviews: &[ReviewInfo]) -> (Vec<(String, ReviewState)>, bool) {
+    let mut humans: Vec<(String, ReviewState)> = Vec::new();
+    let mut codex_reviewed = false;
+    for review in reviews {
+        if is_codex_actor(&review.login) {
+            codex_reviewed = true;
+            continue;
+        }
+        if let Some(state) = review_state_from(&review.state) {
+            humans.push((review.login.clone(), state));
+        }
+    }
+    (humans, codex_reviewed)
+}
+
+fn review_state_from(state: &str) -> Option<ReviewState> {
+    match state {
+        "APPROVED" => Some(ReviewState::Approved),
+        "CHANGES_REQUESTED" => Some(ReviewState::ChangesRequested),
+        "COMMENTED" => Some(ReviewState::Commented),
+        "DISMISSED" => Some(ReviewState::Dismissed),
+        _ => None,
+    }
+}
+
+fn review_decision_from(decision: &str) -> Option<ReviewDecision> {
+    match decision {
+        "APPROVED" => Some(ReviewDecision::Approved),
+        "CHANGES_REQUESTED" => Some(ReviewDecision::ChangesRequested),
+        "REVIEW_REQUIRED" => Some(ReviewDecision::ReviewRequired),
+        _ => None,
+    }
+}
+
+/// Neutral inputs for the pure helpers, so tests need no GraphQL wire shape.
+struct ThreadInfo {
+    resolved: bool,
+    opener: Option<String>,
+}
+
+struct ReactionInfo {
+    content: String,
+    login: String,
+}
+
+struct ReviewInfo {
+    login: String,
+    state: String,
 }
 
 #[derive(Debug, Clone)]
@@ -315,6 +463,7 @@ async fn fetch_items_inner(
             created_at,
             author,
             pr_draft: None,
+            pr_extra: None,
         });
     }
 
@@ -329,13 +478,186 @@ async fn fetch_items_inner(
             created_at,
             author,
             pr_draft,
+            pr_extra: None,
         });
     }
 
     // Sort: PRs first, then issues; within each group by number descending
     items.sort_by(item_cmp);
 
+    // Best-effort GraphQL enrichment for PRs. A failure here must never
+    // downgrade the REST result, so a fetch error just leaves `pr_extra` None.
+    if items.iter().any(|i| i.kind == ItemKind::PullRequest)
+        && let Ok(extras) = fetch_pr_extras(crab, owner, name).await
+    {
+        for item in &mut items {
+            if item.kind == ItemKind::PullRequest {
+                item.pr_extra = extras.get(&item.number).cloned();
+            }
+        }
+    }
+
     Ok(items)
+}
+
+/// Fetches PR-only enrichment (unresolved threads, Codex reaction, review
+/// states) for every open PR in one GraphQL query, keyed by PR number.
+async fn fetch_pr_extras(
+    crab: &Octocrab,
+    owner: &str,
+    name: &str,
+) -> std::result::Result<HashMap<u64, PrExtra>, octocrab::Error> {
+    const QUERY: &str = r#"
+query($owner:String!, $name:String!) {
+  repository(owner:$owner, name:$name) {
+    pullRequests(states:OPEN, first:100) {
+      nodes {
+        number
+        reviewDecision
+        reactions(first:20) { nodes { content user { login } } }
+        reviewThreads(first:100) {
+          nodes { isResolved comments(first:1) { nodes { author { login } } } }
+        }
+        latestReviews(first:50) { nodes { author { login } state } }
+      }
+    }
+  }
+}"#;
+
+    let body = serde_json::json!({
+        "query": QUERY,
+        "variables": { "owner": owner, "name": name },
+    });
+    // octocrab unwraps the GraphQL `data` envelope, so the response deserializes
+    // straight into the repository payload.
+    let resp: GqlData = crab.graphql(&body).await?;
+
+    let nodes = resp
+        .repository
+        .map(|r| r.pull_requests.nodes)
+        .unwrap_or_default();
+
+    Ok(nodes.into_iter().map(|pr| (pr.number, pr.into())).collect())
+}
+
+// --- GraphQL wire shapes (deserialized then converted to `PrExtra`) ---
+// octocrab returns the unwrapped `data` object, so `GqlData` is the top level.
+
+#[derive(Deserialize)]
+struct GqlData {
+    repository: Option<GqlRepo>,
+}
+
+#[derive(Deserialize)]
+struct GqlRepo {
+    #[serde(rename = "pullRequests")]
+    pull_requests: GqlNodes<GqlPr>,
+}
+
+#[derive(Deserialize)]
+struct GqlNodes<T> {
+    #[serde(default = "Vec::new")]
+    nodes: Vec<T>,
+}
+
+impl<T> Default for GqlNodes<T> {
+    fn default() -> Self {
+        GqlNodes { nodes: Vec::new() }
+    }
+}
+
+#[derive(Deserialize)]
+struct GqlPr {
+    number: u64,
+    #[serde(rename = "reviewDecision")]
+    review_decision: Option<String>,
+    #[serde(default)]
+    reactions: GqlNodes<GqlReaction>,
+    #[serde(rename = "reviewThreads", default)]
+    review_threads: GqlNodes<GqlThread>,
+    #[serde(rename = "latestReviews", default)]
+    latest_reviews: GqlNodes<GqlReview>,
+}
+
+#[derive(Deserialize)]
+struct GqlReaction {
+    content: String,
+    user: Option<GqlLogin>,
+}
+
+#[derive(Deserialize)]
+struct GqlThread {
+    #[serde(rename = "isResolved")]
+    is_resolved: bool,
+    #[serde(default)]
+    comments: GqlNodes<GqlComment>,
+}
+
+#[derive(Deserialize)]
+struct GqlComment {
+    author: Option<GqlLogin>,
+}
+
+#[derive(Deserialize)]
+struct GqlReview {
+    author: Option<GqlLogin>,
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct GqlLogin {
+    login: String,
+}
+
+impl From<GqlPr> for PrExtra {
+    fn from(pr: GqlPr) -> Self {
+        let threads: Vec<ThreadInfo> = pr
+            .review_threads
+            .nodes
+            .into_iter()
+            .map(|t| ThreadInfo {
+                resolved: t.is_resolved,
+                opener: t
+                    .comments
+                    .nodes
+                    .into_iter()
+                    .next()
+                    .and_then(|c| c.author)
+                    .map(|a| a.login),
+            })
+            .collect();
+        let reactions: Vec<ReactionInfo> = pr
+            .reactions
+            .nodes
+            .into_iter()
+            .filter_map(|r| {
+                r.user.map(|u| ReactionInfo {
+                    content: r.content,
+                    login: u.login,
+                })
+            })
+            .collect();
+        let reviews: Vec<ReviewInfo> = pr
+            .latest_reviews
+            .nodes
+            .into_iter()
+            .filter_map(|r| {
+                r.author.map(|a| ReviewInfo {
+                    login: a.login,
+                    state: r.state,
+                })
+            })
+            .collect();
+
+        let (human_reviews, codex_reviewed) = collapse_reviews(&reviews);
+        PrExtra {
+            unresolved: unresolved_by_author(&threads),
+            codex: codex_reaction(&reactions),
+            codex_reviewed,
+            reviews: human_reviews,
+            decision: pr.review_decision.as_deref().and_then(review_decision_from),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -350,7 +672,125 @@ mod tests {
             created_at: Utc::now(),
             author: "user".into(),
             pr_draft: None,
+            pr_extra: None,
         }
+    }
+
+    fn thread(resolved: bool, opener: Option<&str>) -> ThreadInfo {
+        ThreadInfo {
+            resolved,
+            opener: opener.map(str::to_owned),
+        }
+    }
+
+    fn reaction(content: &str, login: &str) -> ReactionInfo {
+        ReactionInfo {
+            content: content.into(),
+            login: login.into(),
+        }
+    }
+
+    fn review(login: &str, state: &str) -> ReviewInfo {
+        ReviewInfo {
+            login: login.into(),
+            state: state.into(),
+        }
+    }
+
+    #[test]
+    fn is_codex_actor_matches_bot_and_bare_login() {
+        assert!(is_codex_actor("chatgpt-codex-connector[bot]"));
+        assert!(is_codex_actor("chatgpt-codex-connector"));
+        assert!(!is_codex_actor("coderabbitai[bot]"));
+        assert!(!is_codex_actor("milesibastos"));
+    }
+
+    #[test]
+    fn unresolved_by_author_counts_and_orders() {
+        let threads = [
+            thread(true, Some("milesibastos")),
+            thread(false, Some("chatgpt-codex-connector")),
+            thread(false, Some("chatgpt-codex-connector")),
+            thread(false, Some("alvarolopes")),
+            thread(false, None),
+        ];
+        assert_eq!(
+            unresolved_by_author(&threads),
+            vec![
+                ("chatgpt-codex-connector".to_owned(), 2),
+                ("alvarolopes".to_owned(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn unresolved_by_author_empty_when_all_resolved() {
+        let threads = [thread(true, Some("a")), thread(true, Some("b"))];
+        assert!(unresolved_by_author(&threads).is_empty());
+    }
+
+    #[test]
+    fn codex_reaction_prefers_lgtm_over_reviewing() {
+        let reactions = [
+            reaction("EYES", "chatgpt-codex-connector[bot]"),
+            reaction("THUMBS_UP", "chatgpt-codex-connector[bot]"),
+        ];
+        assert_eq!(codex_reaction(&reactions), Some(CodexReaction::Lgtm));
+    }
+
+    #[test]
+    fn codex_reaction_reviewing_when_only_eyes() {
+        let reactions = [reaction("EYES", "chatgpt-codex-connector[bot]")];
+        assert_eq!(codex_reaction(&reactions), Some(CodexReaction::Reviewing));
+    }
+
+    #[test]
+    fn codex_reaction_ignores_non_codex_and_other_content() {
+        let reactions = [
+            reaction("THUMBS_UP", "milesibastos"),
+            reaction("HEART", "chatgpt-codex-connector[bot]"),
+        ];
+        assert_eq!(codex_reaction(&reactions), None);
+    }
+
+    #[test]
+    fn collapse_reviews_excludes_codex_but_flags_it() {
+        let reviews = [
+            review("chatgpt-codex-connector", "COMMENTED"),
+            review("milesibastos", "APPROVED"),
+            review("alvarolopes", "CHANGES_REQUESTED"),
+        ];
+        let (humans, codex_reviewed) = collapse_reviews(&reviews);
+        assert!(codex_reviewed);
+        assert_eq!(
+            humans,
+            vec![
+                ("milesibastos".to_owned(), ReviewState::Approved),
+                ("alvarolopes".to_owned(), ReviewState::ChangesRequested),
+            ]
+        );
+    }
+
+    #[test]
+    fn collapse_reviews_no_codex_flag_when_absent() {
+        let reviews = [review("milesibastos", "COMMENTED")];
+        let (humans, codex_reviewed) = collapse_reviews(&reviews);
+        assert!(!codex_reviewed);
+        assert_eq!(humans, vec![("milesibastos".to_owned(), ReviewState::Commented)]);
+    }
+
+    #[test]
+    fn review_decision_from_maps_known_values() {
+        assert_eq!(review_decision_from("APPROVED"), Some(ReviewDecision::Approved));
+        assert_eq!(
+            review_decision_from("CHANGES_REQUESTED"),
+            Some(ReviewDecision::ChangesRequested)
+        );
+        assert_eq!(
+            review_decision_from("REVIEW_REQUIRED"),
+            Some(ReviewDecision::ReviewRequired)
+        );
+        assert_eq!(review_decision_from(""), None);
     }
 
     #[test]

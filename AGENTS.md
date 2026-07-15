@@ -24,6 +24,7 @@
 - Digest fetches tracked repos with bounded concurrency (`MAX_CONCURRENT_FETCHES = 4`) and a 30s timeout window; timed-out/unstarted repos render as `timeout after 30s`.
 - GitHub items are fetched from issues and pulls separately; PRs duplicated in the issues endpoint are skipped. Sort order is PRs first, then issues, with each group by number descending.
 - The digest omits repos with zero open items, but the summary still reports total repos checked and how many have pending tasks.
+- PRs are enriched with a **best-effort** GraphQL query per repo (`fetch_pr_extras`): unresolved-review-thread authors, the Codex bot's PR-body reaction, and per-reviewer latest states. It runs only when a repo has open PRs and must never downgrade a successful REST fetch — any GraphQL error leaves `pr_extra` as `None` and the digest renders as before. octocrab unwraps the GraphQL `data` envelope, so responses deserialize straight into the repository payload. The Codex bot appears as `chatgpt-codex-connector[bot]` on reactions but `chatgpt-codex-connector` on reviews; match it with `is_codex_actor`, never `==`. Codex only ever submits COMMENTED reviews, so its 👀/👍 reaction is its real status; `reviewDecision` is usually null and is shown only when populated.
 - `add` stores repos sorted after selection.
 
 ## Release and packaging
