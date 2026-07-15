@@ -4,7 +4,8 @@ use terminal_size::{Width, terminal_size};
 
 use crate::format::{relative_time, truncate_title};
 use crate::github::{
-    CodexReaction, ItemKind, PrExtra, RepoItem, RepoResult, RepoStatus, ReviewDecision, ReviewState,
+    CodexReaction, ItemKind, PrExtra, RepoItem, RepoResult, RepoStatus, ReviewDecision,
+    ReviewState, is_codex_actor,
 };
 use crate::theme::Theme;
 
@@ -188,7 +189,14 @@ fn pr_extra_line(extra: &PrExtra, awaiting_review: bool) -> Option<String> {
     match extra.codex {
         Some(CodexReaction::Reviewing) => segs.push("codex 👀 reviewing".into()),
         Some(CodexReaction::Lgtm) => segs.push("codex 👍 lgtm".into()),
-        None if extra.codex_reviewed => segs.push("codex commented".into()),
+        None if extra.codex_reviewed
+            && !extra
+                .unresolved
+                .iter()
+                .any(|(author, _)| is_codex_actor(author)) =>
+        {
+            segs.push("codex commented".into());
+        }
         None => {}
     }
 
@@ -433,6 +441,17 @@ mod tests {
     }
 
     #[test]
+    fn codex_commented_is_hidden_when_codex_has_an_unresolved_thread() {
+        let mut e = extra(None, true);
+        e.unresolved = vec![("chatgpt-codex-connector".into(), 1)];
+
+        assert_eq!(
+            pr_extra_line(&e, false).as_deref(),
+            Some("1 unresolved by chatgpt-codex-connector")
+        );
+    }
+
+    #[test]
     fn unresolved_lists_every_author_with_total() {
         let mut e = extra(None, false);
         e.unresolved = vec![
@@ -514,6 +533,18 @@ mod tests {
             Some(
                 "1 unresolved by anbillin · awaiting review (4): mdo2, mishamaliga, JorgeBillin, sergiopanaderobillin"
             )
+        );
+    }
+
+    #[test]
+    fn comment_from_another_reviewer_remains_with_unresolved_threads() {
+        let mut e = extra(None, false);
+        e.unresolved = vec![("alice".into(), 1)];
+        e.reviews = vec![("bob".into(), ReviewState::Commented)];
+
+        assert_eq!(
+            pr_extra_line(&e, false).as_deref(),
+            Some("1 unresolved by alice · commented (1): bob")
         );
     }
 
