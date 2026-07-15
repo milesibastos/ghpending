@@ -151,7 +151,8 @@ ghpending --author alice --review-requested bob --match all
 If either CLI role option is present, the CLI author and review-request lists
 replace both configured role lists for that invocation. The configured matching
 mode remains in effect unless `--match` overrides it. PR output includes a
-`review requested:` segment showing current user and team requests.
+`awaiting review (N):` segment showing current user and team requests. Review
+states are likewise grouped as, for example, `approved (2): alice, bob`.
 
 ## Themes
 
