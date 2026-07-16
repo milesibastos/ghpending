@@ -4,8 +4,8 @@ use terminal_size::{Width, terminal_size};
 
 use crate::format::{relative_time, truncate_title};
 use crate::github::{
-    CodexReaction, ItemKind, PrExtra, RepoItem, RepoResult, RepoStatus, ReviewDecision,
-    ReviewState, is_codex_actor,
+    CheckState, CheckSummary, CodexReaction, ItemKind, MergeReadiness, PrExtra, RepoItem,
+    RepoResult, RepoStatus, ReviewDecision, ReviewState, is_codex_actor,
 };
 use crate::theme::Theme;
 
@@ -108,12 +108,11 @@ fn render_inner_filtered(
                         meta.push_str(" · ");
                         meta.push_str(state);
                     }
-                    let meta_colored = paint(&meta, color, theme.meta);
+                    let meta_colored = styled_pr_meta_line(&meta, item, theme, color);
                     body.push_str(&format!("        {meta_colored}\n"));
 
-                    if let Some(line) = pr_detail_line(item) {
-                        let line_colored = paint(&line, color, theme.meta);
-                        body.push_str(&format!("        {line_colored}\n"));
+                    if let Some(line) = styled_pr_detail_line(item, theme, color) {
+                        body.push_str(&format!("        {line}\n"));
                     }
                 }
             }
@@ -150,7 +149,29 @@ fn pr_state_label(item: &RepoItem) -> Option<&'static str> {
     }
 }
 
-fn pr_detail_line(item: &RepoItem) -> Option<String> {
+#[derive(Clone, Copy)]
+enum DetailTone {
+    Meta,
+    Success,
+    Warning,
+    Error,
+}
+
+struct DetailSegment {
+    text: String,
+    tone: DetailTone,
+}
+
+impl DetailSegment {
+    fn meta(text: String) -> Self {
+        DetailSegment {
+            text,
+            tone: DetailTone::Meta,
+        }
+    }
+}
+
+fn pr_detail_segments(item: &RepoItem) -> Vec<DetailSegment> {
     let mut segs = Vec::new();
     let mut awaiting_review = Vec::new();
     let mut awaiting_rereview = Vec::new();
@@ -177,28 +198,128 @@ fn pr_detail_line(item: &RepoItem) -> Option<String> {
     if let Some(extra) = &item.pr_extra
         && let Some(line) = pr_extra_line(extra, has_review_requests, &awaiting_rereview)
     {
-        segs.push(line);
+        segs.push(DetailSegment::meta(line));
     }
 
     if !awaiting_rereview.is_empty() {
-        segs.push(format!(
+        segs.push(DetailSegment::meta(format!(
             "awaiting re-review ({}): {}",
             awaiting_rereview.len(),
             awaiting_rereview.join(", ")
-        ));
+        )));
     }
     if !awaiting_review.is_empty() {
-        segs.push(format!(
+        segs.push(DetailSegment::meta(format!(
             "awaiting review ({}): {}",
             awaiting_review.len(),
             awaiting_review.join(", ")
-        ));
+        )));
     }
 
+    segs
+}
+
+fn pr_status_segments(item: &RepoItem) -> Vec<DetailSegment> {
+    let mut segs = Vec::new();
+    if let Some(extra) = &item.pr_extra {
+        if let Some(checks) = &extra.checks {
+            segs.push(check_segment(checks));
+        }
+        if let Some(readiness) = extra.merge_readiness {
+            segs.push(merge_readiness_segment(readiness));
+        }
+    }
+    segs
+}
+
+#[cfg(test)]
+fn pr_detail_line(item: &RepoItem) -> Option<String> {
+    plain_segments(pr_detail_segments(item))
+}
+
+#[cfg(test)]
+fn pr_status_line(item: &RepoItem) -> Option<String> {
+    plain_segments(pr_status_segments(item))
+}
+
+#[cfg(test)]
+fn plain_segments(segs: Vec<DetailSegment>) -> Option<String> {
     if segs.is_empty() {
         None
     } else {
-        Some(segs.join(" · "))
+        Some(
+            segs.into_iter()
+                .map(|segment| segment.text)
+                .collect::<Vec<_>>()
+                .join(" · "),
+        )
+    }
+}
+
+fn styled_pr_meta_line(meta: &str, item: &RepoItem, theme: &Theme, color: bool) -> String {
+    let mut segs = vec![DetailSegment::meta(meta.to_owned())];
+    segs.extend(pr_status_segments(item));
+    styled_segments(segs, theme, color).expect("metadata always supplies one segment")
+}
+
+fn styled_pr_detail_line(item: &RepoItem, theme: &Theme, color: bool) -> Option<String> {
+    styled_segments(pr_detail_segments(item), theme, color)
+}
+
+fn styled_segments(segs: Vec<DetailSegment>, theme: &Theme, color: bool) -> Option<String> {
+    if segs.is_empty() {
+        return None;
+    }
+    let separator = paint(" · ", color, theme.meta);
+    Some(
+        segs.into_iter()
+            .map(|segment| {
+                let style = match segment.tone {
+                    DetailTone::Meta => theme.meta,
+                    DetailTone::Success => theme.success,
+                    DetailTone::Warning => theme.warning,
+                    DetailTone::Error => theme.error,
+                };
+                paint(&segment.text, color, style)
+            })
+            .collect::<Vec<_>>()
+            .join(&separator),
+    )
+}
+
+fn check_segment(checks: &CheckSummary) -> DetailSegment {
+    let (label, tone) = match checks.state {
+        CheckState::Passed => ("checks passed", DetailTone::Success),
+        CheckState::Pending => ("checks pending", DetailTone::Warning),
+        CheckState::Failed => ("checks failed", DetailTone::Error),
+    };
+    let text = if checks.state == CheckState::Passed {
+        format!("{label} ({})", checks.total)
+    } else if checks.names.is_empty() {
+        label.to_owned()
+    } else {
+        format!(
+            "{label} ({}): {}",
+            checks.names.len(),
+            checks.names.join(", ")
+        )
+    };
+    DetailSegment { text, tone }
+}
+
+fn merge_readiness_segment(readiness: MergeReadiness) -> DetailSegment {
+    let (text, tone) = match readiness {
+        MergeReadiness::Ready => ("merge ready", DetailTone::Success),
+        MergeReadiness::Blocked => ("merge blocked", DetailTone::Error),
+        MergeReadiness::Behind => ("merge behind", DetailTone::Warning),
+        MergeReadiness::Unstable => ("merge unstable", DetailTone::Warning),
+        MergeReadiness::Conflicts => ("merge conflicts", DetailTone::Error),
+        MergeReadiness::Hooks => ("merge hooks", DetailTone::Warning),
+        MergeReadiness::Unknown => ("merge unknown", DetailTone::Warning),
+    };
+    DetailSegment {
+        text: text.to_owned(),
+        tone,
     }
 }
 
@@ -315,7 +436,8 @@ fn review_decision_label(decision: ReviewDecision) -> &'static str {
 mod tests {
     use super::*;
     use crate::github::{
-        CodexReaction, ItemKind, PrExtra, RepoError, RepoItem, RepoResult, RepoStatus, ReviewState,
+        CheckState, CheckSummary, CodexReaction, ItemKind, MergeReadiness, PrExtra, RepoError,
+        RepoItem, RepoResult, RepoStatus, ReviewState,
     };
     use crate::theme::Theme;
 
@@ -447,6 +569,8 @@ mod tests {
             reviews: vec![],
             prior_reviewers: vec![],
             decision: None,
+            checks: None,
+            merge_readiness: None,
         }
     }
 
@@ -652,6 +776,103 @@ mod tests {
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
         let lines: Vec<&str> = out.lines().filter(|l| l.starts_with("        ")).collect();
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn checks_and_merge_render_on_metadata_before_review_detail() {
+        let mut e = extra(None, false);
+        e.checks = Some(CheckSummary {
+            state: CheckState::Failed,
+            total: 4,
+            names: vec!["cargo-test".into(), "clippy".into()],
+        });
+        e.merge_readiness = Some(MergeReadiness::Blocked);
+        e.reviews = vec![("alice".into(), ReviewState::Approved)];
+
+        let pr = make_pr_with_extra(1, e);
+        assert_eq!(
+            pr_status_line(&pr).as_deref(),
+            Some("checks failed (2): cargo-test, clippy · merge blocked")
+        );
+        assert_eq!(pr_detail_line(&pr).as_deref(), Some("approved (1): alice"));
+    }
+
+    #[test]
+    fn pending_and_passed_checks_have_compact_counts() {
+        let mut pending = extra(None, false);
+        pending.checks = Some(CheckSummary {
+            state: CheckState::Pending,
+            total: 3,
+            names: vec!["cargo-test".into(), "clippy".into()],
+        });
+        let mut passed = extra(None, false);
+        passed.checks = Some(CheckSummary {
+            state: CheckState::Passed,
+            total: 4,
+            names: vec![],
+        });
+
+        assert_eq!(
+            pr_status_line(&make_pr_with_extra(2, pending)).as_deref(),
+            Some("checks pending (2): cargo-test, clippy")
+        );
+        assert_eq!(
+            pr_status_line(&make_pr_with_extra(1, passed)).as_deref(),
+            Some("checks passed (4)")
+        );
+    }
+
+    #[test]
+    fn check_and_merge_segments_use_semantic_colors() {
+        let mut e = extra(None, false);
+        e.checks = Some(CheckSummary {
+            state: CheckState::Failed,
+            total: 2,
+            names: vec!["cargo-test".into(), "clippy".into()],
+        });
+        e.merge_readiness = Some(MergeReadiness::Behind);
+        let theme = Theme::default_theme();
+
+        let line = styled_pr_meta_line(
+            "opened just now ago by testuser · ready",
+            &make_pr_with_extra(1, e),
+            &theme,
+            true,
+        );
+
+        assert!(line.contains(&paint(
+            "checks failed (2): cargo-test, clippy",
+            true,
+            theme.error
+        )));
+        assert!(line.contains(&paint("merge behind", true, theme.warning)));
+    }
+
+    #[test]
+    fn check_and_merge_segments_respect_no_color() {
+        let mut e = extra(None, false);
+        e.checks = Some(CheckSummary {
+            state: CheckState::Failed,
+            total: 2,
+            names: vec!["cargo-test".into(), "clippy".into()],
+        });
+        e.merge_readiness = Some(MergeReadiness::Conflicts);
+        let results = vec![RepoResult {
+            repo: "owner/repo".into(),
+            status: RepoStatus::Items(vec![make_pr_with_extra(1, e)]),
+        }];
+
+        let out = render_inner(&results, &Theme::default_theme(), false, 80);
+
+        assert!(!out.contains("\x1b["));
+        let lines = out
+            .lines()
+            .filter(|line| line.starts_with("        "))
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("ready · checks failed (2): cargo-test, clippy · merge conflicts")
+        );
     }
 
     #[test]

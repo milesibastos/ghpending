@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use octocrab::Octocrab;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
 /// Enrichment is bounded on its own, well under the digest's 30s per-repo
@@ -41,10 +41,9 @@ pub enum ItemKind {
     Issue,
 }
 
-/// Extra PR-only signal fetched via GraphQL (review threads, reactions,
-/// reviews). Assembled from the pure helpers below so the wire shape stays at
-/// the edge.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Extra PR-only signals fetched via GraphQL. Assembled from the pure helpers
+/// below so the wire shape stays at the edge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrExtra {
     /// Unresolved review threads attributed to their opening author, most
     /// first. `(login, count)`.
@@ -62,6 +61,36 @@ pub struct PrExtra {
     /// GitHub's rollup, populated only when an opinionated review or branch
     /// protection forces it (usually `None` here).
     pub decision: Option<ReviewDecision>,
+    /// Status checks and legacy commit statuses on the PR's head commit.
+    pub checks: Option<CheckSummary>,
+    /// GitHub's base-aware merge state for the PR.
+    pub merge_readiness: Option<MergeReadiness>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckSummary {
+    pub state: CheckState,
+    pub total: u32,
+    /// Check names matching the aggregate failure or pending state.
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Passed,
+    Pending,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeReadiness {
+    Ready,
+    Blocked,
+    Behind,
+    Unstable,
+    Conflicts,
+    Hooks,
+    Unknown,
 }
 
 /// Codex's PR-body reaction: 👀 while reviewing, 👍 once satisfied. Codex never
@@ -182,6 +211,71 @@ fn review_decision_from(decision: &str) -> Option<ReviewDecision> {
     }
 }
 
+fn merge_readiness_from(state: &str) -> Option<MergeReadiness> {
+    match state {
+        "CLEAN" => Some(MergeReadiness::Ready),
+        "BLOCKED" => Some(MergeReadiness::Blocked),
+        "BEHIND" => Some(MergeReadiness::Behind),
+        "UNSTABLE" => Some(MergeReadiness::Unstable),
+        "DIRTY" => Some(MergeReadiness::Conflicts),
+        "HAS_HOOKS" => Some(MergeReadiness::Hooks),
+        "UNKNOWN" => Some(MergeReadiness::Unknown),
+        _ => None,
+    }
+}
+
+fn check_state_from(state: &str) -> Option<CheckState> {
+    match state {
+        "SUCCESS" => Some(CheckState::Passed),
+        "EXPECTED" | "PENDING" => Some(CheckState::Pending),
+        "ERROR" | "FAILURE" => Some(CheckState::Failed),
+        _ => None,
+    }
+}
+
+fn check_context_state(context: &CheckContextInfo) -> Option<CheckState> {
+    match context {
+        CheckContextInfo::Run {
+            status,
+            conclusion: _,
+            ..
+        } if status != "COMPLETED" => Some(CheckState::Pending),
+        CheckContextInfo::Run { conclusion, .. } => match conclusion.as_deref() {
+            Some("SUCCESS" | "NEUTRAL" | "SKIPPED") => Some(CheckState::Passed),
+            Some(
+                "ACTION_REQUIRED" | "TIMED_OUT" | "CANCELLED" | "FAILURE" | "STARTUP_FAILURE"
+                | "STALE",
+            ) => Some(CheckState::Failed),
+            None => Some(CheckState::Pending),
+            Some(_) => None,
+        },
+        CheckContextInfo::Status { state, .. } => check_state_from(state),
+    }
+}
+
+fn summarize_checks(
+    state: &str,
+    total: u32,
+    contexts: &[CheckContextInfo],
+) -> Option<CheckSummary> {
+    let state = check_state_from(state)?;
+    let names = if state == CheckState::Passed {
+        Vec::new()
+    } else {
+        contexts
+            .iter()
+            .filter(|context| check_context_state(context) == Some(state))
+            .map(CheckContextInfo::name)
+            .map(str::to_owned)
+            .collect()
+    };
+    Some(CheckSummary {
+        state,
+        total,
+        names,
+    })
+}
+
 /// Neutral inputs for the pure helpers, so tests need no GraphQL wire shape.
 struct ThreadInfo {
     resolved: bool,
@@ -196,6 +290,26 @@ struct ReactionInfo {
 struct ReviewInfo {
     login: String,
     state: String,
+}
+
+enum CheckContextInfo {
+    Run {
+        name: String,
+        status: String,
+        conclusion: Option<String>,
+    },
+    Status {
+        name: String,
+        state: String,
+    },
+}
+
+impl CheckContextInfo {
+    fn name(&self) -> &str {
+        match self {
+            CheckContextInfo::Run { name, .. } | CheckContextInfo::Status { name, .. } => name,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -528,15 +642,24 @@ async fn fetch_items_inner(
     // Sort: PRs first, then issues; within each group by number descending
     items.sort_by(item_cmp);
 
-    // Best-effort GraphQL enrichment for PRs. A failure *or timeout* here must
-    // never downgrade the REST result: enrichment is bounded separately
-    // (`ENRICH_TIMEOUT`) so a hung GraphQL call cannot burn the digest's whole
-    // per-repo deadline and turn the completed REST fetch into a timeout. On
-    // either error the items simply keep `pr_extra` None.
-    if items.iter().any(|i| i.kind == ItemKind::PullRequest)
-        && let Ok(Ok(extras)) =
-            tokio::time::timeout(ENRICH_TIMEOUT, fetch_pr_extras(crab, owner, name)).await
-    {
+    // Review and check enrichment are independent so a token without check
+    // access still gets review context. Either query may fail or time out
+    // without downgrading the completed REST result.
+    if items.iter().any(|i| i.kind == ItemKind::PullRequest) {
+        let (extras_result, checks_result) = tokio::join!(
+            fetch_pr_extras(crab, owner, name),
+            fetch_pr_checks(crab, owner, name),
+        );
+        let mut extras = extras_result.unwrap_or_default();
+        if let Ok(checks) = checks_result {
+            for (number, status) in checks {
+                let extra = extras.entry(number).or_default();
+                extra.checks = status.checks;
+                if extra.merge_readiness.is_none() {
+                    extra.merge_readiness = status.merge_readiness;
+                }
+            }
+        }
         for item in &mut items {
             if item.kind == ItemKind::PullRequest {
                 item.pr_extra = extras.get(&item.number).cloned();
@@ -547,21 +670,21 @@ async fn fetch_items_inner(
     Ok(items)
 }
 
-/// Fetches PR-only enrichment (unresolved threads, Codex reaction, current
-/// review states, and recent review history) for every open PR in one GraphQL
-/// query, keyed by PR number.
+/// Fetches PR-only review and merge enrichment, newest activity first. Pages
+/// until the enrichment deadline and retains every completed page.
 async fn fetch_pr_extras(
     crab: &Octocrab,
     owner: &str,
     name: &str,
 ) -> std::result::Result<HashMap<u64, PrExtra>, octocrab::Error> {
     const QUERY: &str = r#"
-query($owner:String!, $name:String!) {
+query($owner:String!, $name:String!, $cursor:String) {
   repository(owner:$owner, name:$name) {
-    pullRequests(states:OPEN, first:100) {
+    pullRequests(states:OPEN, first:100, after:$cursor, orderBy:{field:UPDATED_AT,direction:DESC}) {
       nodes {
         number
         reviewDecision
+        mergeStateStatus
         reactions(first:100) { nodes { content user { login } } }
         reviewThreads(first:100) {
           nodes { isResolved comments(first:1) { nodes { author { login } } } }
@@ -569,24 +692,114 @@ query($owner:String!, $name:String!) {
         latestReviews(first:100) { nodes { author { login } state } }
         reviews(last:100) { nodes { author { login } state } }
       }
+      pageInfo { hasNextPage endCursor }
     }
   }
 }"#;
 
-    let body = serde_json::json!({
-        "query": QUERY,
-        "variables": { "owner": owner, "name": name },
-    });
-    // octocrab unwraps the GraphQL `data` envelope, so the response deserializes
-    // straight into the repository payload.
-    let resp: GqlData = crab.graphql(&body).await?;
+    let deadline = tokio::time::Instant::now() + ENRICH_TIMEOUT;
+    let mut cursor: Option<String> = None;
+    let mut extras = HashMap::new();
+    loop {
+        let body = serde_json::json!({
+            "query": QUERY,
+            "variables": { "owner": owner, "name": name, "cursor": cursor },
+        });
+        // octocrab unwraps the GraphQL `data` envelope, so the response
+        // deserializes straight into the repository payload.
+        let resp: GqlData = match tokio::time::timeout_at(deadline, crab.graphql(&body)).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(error)) if extras.is_empty() => return Err(error),
+            Ok(Err(_)) | Err(_) => break,
+        };
+        let Some(repo) = resp.repository else {
+            break;
+        };
+        let GqlNodes { nodes, page_info } = repo.pull_requests;
+        extras.extend(nodes.into_iter().map(|pr| (pr.number, pr.into())));
+        if !page_info.has_next_page {
+            break;
+        }
+        let Some(next_cursor) = page_info.end_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
 
-    let nodes = resp
-        .repository
-        .map(|r| r.pull_requests.nodes)
-        .unwrap_or_default();
+    Ok(extras)
+}
 
-    Ok(nodes.into_iter().map(|pr| (pr.number, pr.into())).collect())
+/// Fetches head-commit check rollups separately so permission errors cannot
+/// suppress the review enrichment above. Merge state is repeated here as a
+/// cheap fallback when the heavier review query times out. Pages newest
+/// activity first and retains every page completed before its deadline.
+async fn fetch_pr_checks(
+    crab: &Octocrab,
+    owner: &str,
+    name: &str,
+) -> std::result::Result<HashMap<u64, PrCheckExtra>, octocrab::Error> {
+    const QUERY: &str = r#"
+query($owner:String!, $name:String!, $cursor:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequests(states:OPEN, first:100, after:$cursor, orderBy:{field:UPDATED_AT,direction:DESC}) {
+      nodes {
+        number
+        mergeStateStatus
+        commits(last:1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                state
+                contexts(first:100) {
+                  totalCount
+                  nodes {
+                    __typename
+                    ... on CheckRun { name status conclusion }
+                    ... on StatusContext { context state }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"#;
+
+    let deadline = tokio::time::Instant::now() + ENRICH_TIMEOUT;
+    let mut cursor: Option<String> = None;
+    let mut checks = HashMap::new();
+    loop {
+        let body = serde_json::json!({
+            "query": QUERY,
+            "variables": { "owner": owner, "name": name, "cursor": cursor },
+        });
+        let resp: GqlCheckData = match tokio::time::timeout_at(deadline, crab.graphql(&body)).await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(error)) if checks.is_empty() => return Err(error),
+            Ok(Err(_)) | Err(_) => break,
+        };
+        let Some(repo) = resp.repository else {
+            break;
+        };
+        let GqlNodes { nodes, page_info } = repo.pull_requests;
+        checks.extend(nodes.into_iter().map(|pr| {
+            let number = pr.number;
+            (number, pr.into_extra())
+        }));
+        if !page_info.has_next_page {
+            break;
+        }
+        let Some(next_cursor) = page_info.end_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    Ok(checks)
 }
 
 // --- GraphQL wire shapes (deserialized then converted to `PrExtra`) ---
@@ -604,14 +817,37 @@ struct GqlRepo {
 }
 
 #[derive(Deserialize)]
+#[serde(bound(deserialize = "T: Deserialize<'de>"))]
 struct GqlNodes<T> {
-    #[serde(default = "Vec::new")]
+    #[serde(default, deserialize_with = "deserialize_nodes")]
     nodes: Vec<T>,
+    #[serde(rename = "pageInfo", default)]
+    page_info: GqlPageInfo,
+}
+
+#[derive(Default, Deserialize)]
+struct GqlPageInfo {
+    #[serde(rename = "hasNextPage", default)]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
+fn deserialize_nodes<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let nodes = Option::<Vec<Option<T>>>::deserialize(deserializer)?;
+    Ok(nodes.unwrap_or_default().into_iter().flatten().collect())
 }
 
 impl<T> Default for GqlNodes<T> {
     fn default() -> Self {
-        GqlNodes { nodes: Vec::new() }
+        GqlNodes {
+            nodes: Vec::new(),
+            page_info: GqlPageInfo::default(),
+        }
     }
 }
 
@@ -620,6 +856,8 @@ struct GqlPr {
     number: u64,
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
+    #[serde(rename = "mergeStateStatus")]
+    merge_state_status: Option<String>,
     #[serde(default)]
     reactions: GqlNodes<GqlReaction>,
     #[serde(rename = "reviewThreads", default)]
@@ -658,6 +896,112 @@ struct GqlReview {
 #[derive(Deserialize)]
 struct GqlLogin {
     login: String,
+}
+
+#[derive(Deserialize)]
+struct GqlCheckData {
+    repository: Option<GqlCheckRepo>,
+}
+
+#[derive(Deserialize)]
+struct GqlCheckRepo {
+    #[serde(rename = "pullRequests")]
+    pull_requests: GqlNodes<GqlCheckPr>,
+}
+
+#[derive(Deserialize)]
+struct GqlCheckPr {
+    number: u64,
+    #[serde(rename = "mergeStateStatus")]
+    merge_state_status: Option<String>,
+    #[serde(default)]
+    commits: GqlNodes<GqlCommitNode>,
+}
+
+struct PrCheckExtra {
+    checks: Option<CheckSummary>,
+    merge_readiness: Option<MergeReadiness>,
+}
+
+#[derive(Deserialize)]
+struct GqlCommitNode {
+    commit: GqlCommit,
+}
+
+#[derive(Deserialize)]
+struct GqlCommit {
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Option<GqlStatusCheckRollup>,
+}
+
+#[derive(Deserialize)]
+struct GqlStatusCheckRollup {
+    state: String,
+    contexts: GqlCheckContexts,
+}
+
+#[derive(Deserialize)]
+struct GqlCheckContexts {
+    #[serde(rename = "totalCount")]
+    total_count: u32,
+    #[serde(default, deserialize_with = "deserialize_nodes")]
+    nodes: Vec<GqlCheckContext>,
+}
+
+#[derive(Deserialize)]
+struct GqlCheckContext {
+    #[serde(rename = "__typename")]
+    kind: String,
+    name: Option<String>,
+    status: Option<String>,
+    conclusion: Option<String>,
+    context: Option<String>,
+    state: Option<String>,
+}
+
+impl GqlCheckPr {
+    fn into_extra(self) -> PrCheckExtra {
+        let merge_readiness = self
+            .merge_state_status
+            .as_deref()
+            .and_then(merge_readiness_from);
+        let checks = self
+            .commits
+            .nodes
+            .into_iter()
+            .next()
+            .and_then(|node| node.commit.status_check_rollup)
+            .and_then(|rollup| {
+                let contexts = rollup
+                    .contexts
+                    .nodes
+                    .into_iter()
+                    .filter_map(GqlCheckContext::into_info)
+                    .collect::<Vec<_>>();
+                summarize_checks(&rollup.state, rollup.contexts.total_count, &contexts)
+            });
+        PrCheckExtra {
+            checks,
+            merge_readiness,
+        }
+    }
+}
+
+impl GqlCheckContext {
+    fn into_info(self) -> Option<CheckContextInfo> {
+        match self.kind.as_str() {
+            "CheckRun" => Some(CheckContextInfo::Run {
+                name: self.name?,
+                status: self.status?,
+                conclusion: self.conclusion,
+            }),
+            "StatusContext" => Some(CheckContextInfo::Status {
+                name: self.context?,
+                state: self.state?,
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl From<GqlPr> for PrExtra {
@@ -719,6 +1063,11 @@ impl From<GqlPr> for PrExtra {
             reviews: human_reviews,
             prior_reviewers: prior_reviewers(&review_history),
             decision: pr.review_decision.as_deref().and_then(review_decision_from),
+            checks: None,
+            merge_readiness: pr
+                .merge_state_status
+                .as_deref()
+                .and_then(merge_readiness_from),
         }
     }
 }
@@ -758,6 +1107,21 @@ mod tests {
     fn review(login: &str, state: &str) -> ReviewInfo {
         ReviewInfo {
             login: login.into(),
+            state: state.into(),
+        }
+    }
+
+    fn check_run(name: &str, status: &str, conclusion: Option<&str>) -> CheckContextInfo {
+        CheckContextInfo::Run {
+            name: name.into(),
+            status: status.into(),
+            conclusion: conclusion.map(str::to_owned),
+        }
+    }
+
+    fn status_context(name: &str, state: &str) -> CheckContextInfo {
+        CheckContextInfo::Status {
+            name: name.into(),
             state: state.into(),
         }
     }
@@ -877,6 +1241,184 @@ mod tests {
             Some(ReviewDecision::ReviewRequired)
         );
         assert_eq!(review_decision_from(""), None);
+    }
+
+    #[test]
+    fn merge_readiness_from_maps_github_states() {
+        assert_eq!(merge_readiness_from("CLEAN"), Some(MergeReadiness::Ready));
+        assert_eq!(
+            merge_readiness_from("BLOCKED"),
+            Some(MergeReadiness::Blocked)
+        );
+        assert_eq!(merge_readiness_from("BEHIND"), Some(MergeReadiness::Behind));
+        assert_eq!(
+            merge_readiness_from("UNSTABLE"),
+            Some(MergeReadiness::Unstable)
+        );
+        assert_eq!(
+            merge_readiness_from("DIRTY"),
+            Some(MergeReadiness::Conflicts)
+        );
+        assert_eq!(
+            merge_readiness_from("HAS_HOOKS"),
+            Some(MergeReadiness::Hooks)
+        );
+        assert_eq!(
+            merge_readiness_from("UNKNOWN"),
+            Some(MergeReadiness::Unknown)
+        );
+        assert_eq!(merge_readiness_from("NEW_STATE"), None);
+    }
+
+    #[test]
+    fn failed_checks_include_runs_and_legacy_statuses() {
+        let contexts = [
+            check_run("cargo-test", "COMPLETED", Some("FAILURE")),
+            check_run("clippy", "COMPLETED", Some("CANCELLED")),
+            check_run("format", "COMPLETED", Some("SUCCESS")),
+            status_context("coverage", "ERROR"),
+        ];
+
+        assert_eq!(
+            summarize_checks("FAILURE", 4, &contexts),
+            Some(CheckSummary {
+                state: CheckState::Failed,
+                total: 4,
+                names: vec!["cargo-test".into(), "clippy".into(), "coverage".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn pending_checks_include_queued_runs_and_expected_statuses() {
+        let contexts = [
+            check_run("cargo-test", "IN_PROGRESS", None),
+            check_run("clippy", "QUEUED", None),
+            status_context("deploy", "EXPECTED"),
+            status_context("coverage", "SUCCESS"),
+        ];
+
+        assert_eq!(
+            summarize_checks("PENDING", 4, &contexts),
+            Some(CheckSummary {
+                state: CheckState::Pending,
+                total: 4,
+                names: vec!["cargo-test".into(), "clippy".into(), "deploy".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn passed_checks_retain_total_without_names() {
+        let contexts = [
+            check_run("cargo-test", "COMPLETED", Some("SUCCESS")),
+            check_run("docs", "COMPLETED", Some("SKIPPED")),
+        ];
+
+        assert_eq!(
+            summarize_checks("SUCCESS", 2, &contexts),
+            Some(CheckSummary {
+                state: CheckState::Passed,
+                total: 2,
+                names: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn check_conclusions_map_to_github_rollup_groups() {
+        for conclusion in [
+            "ACTION_REQUIRED",
+            "TIMED_OUT",
+            "CANCELLED",
+            "FAILURE",
+            "STARTUP_FAILURE",
+            "STALE",
+        ] {
+            assert_eq!(
+                check_context_state(&check_run("ci", "COMPLETED", Some(conclusion))),
+                Some(CheckState::Failed)
+            );
+        }
+        for conclusion in ["SUCCESS", "NEUTRAL", "SKIPPED"] {
+            assert_eq!(
+                check_context_state(&check_run("ci", "COMPLETED", Some(conclusion))),
+                Some(CheckState::Passed)
+            );
+        }
+    }
+
+    #[test]
+    fn check_graphql_shape_tolerates_null_connections_and_nodes() {
+        let data: GqlCheckData = serde_json::from_value(serde_json::json!({
+            "repository": {
+                "pullRequests": {
+                    "pageInfo": {
+                        "hasNextPage": true,
+                        "endCursor": "next-page"
+                    },
+                    "nodes": [
+                        null,
+                        {
+                            "number": 7,
+                            "mergeStateStatus": "DIRTY",
+                            "commits": {
+                                "nodes": [
+                                    null,
+                                    {
+                                        "commit": {
+                                            "statusCheckRollup": {
+                                                "state": "FAILURE",
+                                                "contexts": {
+                                                    "totalCount": 1,
+                                                    "nodes": [
+                                                        null,
+                                                        {
+                                                            "__typename": "CheckRun",
+                                                            "name": "cargo-test",
+                                                            "status": "COMPLETED",
+                                                            "conclusion": "FAILURE"
+                                                        }
+                                                    ]
+                                                }
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "number": 8,
+                            "mergeStateStatus": "CLEAN",
+                            "commits": { "nodes": null }
+                        }
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+
+        let connection = data.repository.unwrap().pull_requests;
+        assert!(connection.page_info.has_next_page);
+        assert_eq!(
+            connection.page_info.end_cursor.as_deref(),
+            Some("next-page")
+        );
+        let mut nodes = connection.nodes;
+        assert_eq!(nodes.len(), 2);
+        let first = nodes.remove(0).into_extra();
+        assert_eq!(first.merge_readiness, Some(MergeReadiness::Conflicts));
+        assert_eq!(
+            first.checks,
+            Some(CheckSummary {
+                state: CheckState::Failed,
+                total: 1,
+                names: vec!["cargo-test".into()],
+            })
+        );
+        let second = nodes.remove(0).into_extra();
+        assert_eq!(second.merge_readiness, Some(MergeReadiness::Ready));
+        assert_eq!(second.checks, None);
     }
 
     #[test]
