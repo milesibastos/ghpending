@@ -7,6 +7,8 @@ pub struct Theme {
     pub pr: Style,
     pub issue: Style,
     pub meta: Style,
+    pub success: Style,
+    pub warning: Style,
     pub error: Style,
 }
 
@@ -17,6 +19,8 @@ impl Theme {
             pr: Style::new().magenta(),
             issue: Style::new().yellow(),
             meta: Style::new().dimmed(),
+            success: Style::new().green().dimmed(),
+            warning: Style::new().yellow().dimmed(),
             error: Style::new().red().dimmed(),
         }
     }
@@ -27,6 +31,8 @@ impl Theme {
             pr: Style::new().color(XtermColors::ChartreuseGreen),
             issue: Style::new().color(XtermColors::FlushOrange),
             meta: Style::new().color(XtermColors::WildBlueYonder),
+            success: Style::new().color(XtermColors::ChartreuseGreen),
+            warning: Style::new().color(XtermColors::FlushOrange),
             error: Style::new().color(XtermColors::Red),
         }
     }
@@ -37,6 +43,8 @@ impl Theme {
             pr: Style::new().color(XtermColors::SpringGreen),
             issue: Style::new().color(XtermColors::YellowSea),
             meta: Style::new().dimmed().color(XtermColors::BondiBlue),
+            success: Style::new().color(XtermColors::SpringGreen),
+            warning: Style::new().color(XtermColors::YellowSea),
             error: Style::new().bold().color(XtermColors::Red),
         }
     }

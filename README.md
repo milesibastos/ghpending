@@ -85,7 +85,7 @@ Everything works unauthenticated for public repos, subject to GitHub's default 6
 GITHUB_TOKEN=$(gh auth token) ghpending
 ```
 
-The token is read silently at startup — no configuration needed. To track **private** repos (and have them show up in `ghpending add`), the token needs the `repo` scope (classic) or read access to the repo's Contents, Issues and Pull requests (fine-grained).
+The token is read silently at startup — no configuration needed. To track **private** repos (and have them show up in `ghpending add`), the token needs the `repo` scope (classic) or read access to the repo's Contents, Issues and Pull requests (fine-grained). Checks and Commit statuses read access enables CI details; without it, the rest of the digest still renders.
 
 ### GitHub API proxy (optional)
 
@@ -152,15 +152,33 @@ If either CLI role option is present, the CLI author and review-request lists
 replace both configured role lists for that invocation. The configured matching
 mode remains in effect unless `--match` overrides it.
 
-### Review context
+### PR context
 
-PR detail lines condense the current review state into segments such as:
+The second PR line appends checks and merge readiness after `ready`/`draft`;
+the optional third line holds review context. Status segments include:
 
 ```text
+opened 2h ago by alice · ready · checks failed (2): cargo-test, clippy · merge blocked
+awaiting review (1): alice
+opened 1d ago by bob · ready · checks pending (1): integration · merge unstable
+opened 3d ago by carol · ready · checks passed (4) · merge ready
+approved (2): alice, bob
 approved (2): alice, bob · awaiting review (2): carol, team:my-org/backend
 1 unresolved by alice · awaiting review (1): bob
 awaiting re-review (1): alice · awaiting review (1): bob
 ```
+
+Check state combines GitHub check runs and legacy commit statuses on the PR's
+head commit. Failed and pending states list matching check names; a passing
+state shows the total number of contexts. Names are best-effort and limited to
+the first 100 contexts. A PR with no check rollup emits no check segment.
+
+Merge readiness follows GitHub's base-aware `mergeStateStatus`: `merge ready`,
+`merge blocked`, `merge behind`, `merge unstable`, `merge conflicts`,
+`merge hooks`, or `merge unknown`. A hooks state has passing checks but can
+still be rejected by a pre-receive hook.
+Passing/ready states are green, pending/intermediate states yellow, and
+failed/blocked states red. `NO_COLOR=1` keeps the same text without ANSI color.
 
 Human reviewers are grouped by their latest state, with approvals first. `N` is
 the number of reviewers in a state group, but the number of current request
@@ -175,10 +193,15 @@ current requests already show who or which team is awaited. A neutral
 `commented` state is hidden only when the same login already appears in
 `unresolved`.
 
-Review states and unresolved threads are best-effort GraphQL enrichment. Current
-review requests come from REST and still render if enrichment fails. Re-review
-detection also depends on that enrichment; without recent history, the request
-falls back to ordinary `awaiting review`.
+Checks and review/merge context use independent best-effort GraphQL queries, so
+a check permission failure does not suppress review context. Current review
+requests come from REST and still render if enrichment fails. Re-review
+detection also depends on review enrichment; without recent history, the
+request falls back to ordinary `awaiting review`.
+
+Open PR enrichment pages from the most recently updated PRs within an 8-second
+budget per query. Completed pages are retained on large or slow repositories;
+older inactive PRs may omit best-effort context when that budget expires.
 
 ## Themes
 
