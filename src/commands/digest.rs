@@ -19,14 +19,16 @@ pub async fn run(
     crab: &Octocrab,
     theme: &Theme,
     cfg_path: &Path,
+    repo: Option<&str>,
     cli_authors: &[String],
     cli_review_requested: &[String],
     cli_mode: Option<FilterMode>,
 ) -> Result<()> {
     let cfg = config::load_from(cfg_path)?;
     let filters = resolve_filters(&cfg.filters, cli_authors, cli_review_requested, cli_mode)?;
+    let repos = resolve_repos(&cfg.repos, repo);
 
-    if cfg.repos.is_empty() {
+    if repos.is_empty() {
         println!("No repos tracked. Run `ghpending add` to get started.");
         return Ok(());
     }
@@ -40,7 +42,7 @@ pub async fn run(
     spinner.set_message("Fetching…");
     spinner.enable_steady_tick(Duration::from_millis(100));
 
-    let mut results = fetch_repos(crab, &cfg.repos).await;
+    let mut results = fetch_repos(crab, &repos).await;
     apply_filters(&mut results, &filters);
 
     spinner.finish_and_clear();
@@ -53,6 +55,13 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+fn resolve_repos(configured: &[String], repo: Option<&str>) -> Vec<String> {
+    match repo {
+        Some(repo) => vec![repo.to_owned()],
+        None => configured.to_vec(),
+    }
 }
 
 fn resolve_filters(
@@ -201,6 +210,7 @@ async fn fetch_repo_with_timeout(
 fn timeout_result(repo: String) -> RepoResult {
     RepoResult {
         repo,
+        metadata: None,
         status: RepoStatus::Error(RepoError::Timeout),
     }
 }
@@ -348,14 +358,27 @@ mod tests {
     }
 
     #[test]
+    fn one_off_repository_replaces_configured_watch_list() {
+        let configured = vec!["owner/one".into(), "owner/two".into()];
+
+        assert_eq!(
+            resolve_repos(&configured, Some("other/repo")),
+            ["other/repo"]
+        );
+        assert_eq!(resolve_repos(&configured, None), configured);
+    }
+
+    #[test]
     fn filtering_keeps_repository_failures_visible() {
         let mut results = vec![
             RepoResult {
                 repo: "a/repo".into(),
+                metadata: None,
                 status: RepoStatus::Items(vec![item(ItemKind::Issue, "bob")]),
             },
             RepoResult {
                 repo: "a/failure".into(),
+                metadata: None,
                 status: RepoStatus::Error(RepoError::Api("boom".into())),
             },
         ];
@@ -371,21 +394,25 @@ mod tests {
         assert!(all_repo_fetches_failed(&[
             RepoResult {
                 repo: "a/b".into(),
+                metadata: None,
                 status: RepoStatus::Error(RepoError::Timeout),
             },
             RepoResult {
                 repo: "c/d".into(),
+                metadata: None,
                 status: RepoStatus::Error(RepoError::Api("boom".into())),
             },
         ]));
 
         assert!(!all_repo_fetches_failed(&[RepoResult {
             repo: "a/b".into(),
+            metadata: None,
             status: RepoStatus::NotFound,
         }]));
 
         assert!(!all_repo_fetches_failed(&[RepoResult {
             repo: "a/b".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![]),
         }]));
 

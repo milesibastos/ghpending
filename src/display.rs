@@ -1,11 +1,11 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use owo_colors::Style;
 use terminal_size::{Width, terminal_size};
 
 use crate::format::{relative_time, truncate_title};
 use crate::github::{
     CheckState, CheckSummary, CodexReaction, ItemKind, MergeReadiness, PrExtra, RepoItem,
-    RepoResult, RepoStatus, ReviewDecision, ReviewState, is_codex_actor,
+    RepoMetadata, RepoResult, RepoStatus, ReviewDecision, ReviewState, is_codex_actor,
 };
 use crate::theme::Theme;
 
@@ -70,7 +70,26 @@ fn render_inner_filtered(
         shown += 1;
 
         let repo_colored = paint(&result.repo, color, theme.repo);
-        body.push_str(&format!("━━ {repo_colored}\n"));
+        let mut metadata_segments = repo_metadata_segments(result.metadata.as_ref(), &now);
+        while let Some(metadata) =
+            (!metadata_segments.is_empty()).then(|| metadata_segments.join(" · "))
+        {
+            let header_width = 3 + result.repo.chars().count() + 3 + metadata.chars().count();
+            if header_width <= width {
+                break;
+            }
+            metadata_segments.pop();
+        }
+        body.push_str(&format!("━━ {repo_colored}"));
+        if !metadata_segments.is_empty() {
+            let metadata = paint(
+                &format!(" · {}", metadata_segments.join(" · ")),
+                color,
+                theme.meta,
+            );
+            body.push_str(&metadata);
+        }
+        body.push('\n');
 
         match &result.status {
             RepoStatus::NotFound => {
@@ -124,10 +143,13 @@ fn render_inner_filtered(
     } else {
         "pending tasks"
     };
+    let project_label = if total == 1 { "project" } else { "projects" };
     let summary = if failures > 0 {
-        format!("{total} projects attempted, {with_pending} with {task_label}, {failures} failed")
+        format!(
+            "{total} {project_label} attempted, {with_pending} with {task_label}, {failures} failed"
+        )
     } else {
-        format!("{total} projects checked, {with_pending} with {task_label}")
+        format!("{total} {project_label} checked, {with_pending} with {task_label}")
     };
     let summary_colored = paint(&summary, color, theme.meta);
 
@@ -136,6 +158,36 @@ fn render_inner_filtered(
     } else {
         format!("{summary_colored}\n\n{body}")
     }
+}
+
+fn repo_metadata_segments(metadata: Option<&RepoMetadata>, now: &DateTime<Utc>) -> Vec<String> {
+    let Some(metadata) = metadata else {
+        return Vec::new();
+    };
+    let mut segments = Vec::new();
+
+    if let Some(release) = &metadata.release {
+        let kind = if release.is_prerelease {
+            "prerelease"
+        } else {
+            "release"
+        };
+        segments.push(format!(
+            "{kind} {} ({})",
+            release.tag_name,
+            relative_time(&release.published_at, now)
+        ));
+    }
+    if let Some(tag) = &metadata.recent_tag
+        && metadata
+            .release
+            .as_ref()
+            .is_none_or(|release| release.tag_name != *tag)
+    {
+        segments.push(format!("tag {tag}"));
+    }
+
+    segments
 }
 
 fn pr_state_label(item: &RepoItem) -> Option<&'static str> {
@@ -222,11 +274,11 @@ fn pr_detail_segments(item: &RepoItem) -> Vec<DetailSegment> {
 fn pr_status_segments(item: &RepoItem) -> Vec<DetailSegment> {
     let mut segs = Vec::new();
     if let Some(extra) = &item.pr_extra {
-        if let Some(checks) = &extra.checks {
-            segs.push(check_segment(checks));
-        }
         if let Some(readiness) = extra.merge_readiness {
             segs.push(merge_readiness_segment(readiness));
+        }
+        if let Some(checks) = &extra.checks {
+            segs.push(check_segment(checks));
         }
     }
     segs
@@ -436,8 +488,8 @@ fn review_decision_label(decision: ReviewDecision) -> &'static str {
 mod tests {
     use super::*;
     use crate::github::{
-        CheckState, CheckSummary, CodexReaction, ItemKind, MergeReadiness, PrExtra, RepoError,
-        RepoItem, RepoResult, RepoStatus, ReviewState,
+        CheckState, CheckSummary, CodexReaction, ItemKind, MergeReadiness, PrExtra,
+        ReleaseMetadata, RepoError, RepoItem, RepoResult, RepoStatus, ReviewState,
     };
     use crate::theme::Theme;
 
@@ -494,18 +546,20 @@ mod tests {
     fn empty_repo_is_skipped_from_listing() {
         let results = vec![RepoResult {
             repo: "owner/empty".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![]),
         }];
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
         assert!(!out.contains("owner/empty"));
         assert!(!out.contains("nothing pending"));
-        assert!(out.contains("1 projects checked, 0 with pending tasks"));
+        assert!(out.contains("1 project checked, 0 with pending tasks"));
     }
 
     #[test]
     fn repo_not_found() {
         let results = vec![RepoResult {
             repo: "owner/missing".into(),
+            metadata: None,
             status: RepoStatus::NotFound,
         }];
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
@@ -517,6 +571,7 @@ mod tests {
     fn repo_error_renders_message() {
         let results = vec![RepoResult {
             repo: "owner/flaky".into(),
+            metadata: None,
             status: RepoStatus::Error(RepoError::Api("rate limited".into())),
         }];
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
@@ -529,6 +584,7 @@ mod tests {
     fn normal_items_rendered() {
         let results = vec![RepoResult {
             repo: "ratatui-org/ratatui".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![
                 make_item(ItemKind::PullRequest, 1842, "Fix overflow in Table", 2),
                 make_item(ItemKind::Issue, 1840, "Crash on empty Paragraph", 0),
@@ -548,6 +604,7 @@ mod tests {
     fn pull_request_draft_status_is_rendered_subtly() {
         let results = vec![RepoResult {
             repo: "owner/repo".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![
                 make_pr(3, "Work in progress", Some(true)),
                 make_pr(2, "Ready for review", Some(false)),
@@ -578,6 +635,7 @@ mod tests {
     fn codex_reviewing_and_lgtm_render() {
         let results = vec![RepoResult {
             repo: "a/b".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![
                 make_pr_with_extra(2, extra(Some(CodexReaction::Reviewing), true)),
                 make_pr_with_extra(1, extra(Some(CodexReaction::Lgtm), true)),
@@ -592,6 +650,7 @@ mod tests {
     fn codex_commented_fallback_when_reviewed_without_reaction() {
         let results = vec![RepoResult {
             repo: "a/b".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![make_pr_with_extra(1, extra(None, true))]),
         }];
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
@@ -618,6 +677,7 @@ mod tests {
         ];
         let results = vec![RepoResult {
             repo: "a/b".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![make_pr_with_extra(1, e)]),
         }];
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
@@ -748,6 +808,7 @@ mod tests {
         pr.requested_teams = vec!["owner/backend".into()];
         let results = vec![RepoResult {
             repo: "owner/repo".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![pr]),
         }];
 
@@ -759,6 +820,7 @@ mod tests {
     fn pr_without_extra_has_no_third_line() {
         let results = vec![RepoResult {
             repo: "a/b".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![make_pr(1, "Plain PR", Some(false))]),
         }];
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
@@ -771,6 +833,7 @@ mod tests {
     fn empty_extra_emits_no_third_line() {
         let results = vec![RepoResult {
             repo: "a/b".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![make_pr_with_extra(1, extra(None, false))]),
         }];
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
@@ -792,7 +855,7 @@ mod tests {
         let pr = make_pr_with_extra(1, e);
         assert_eq!(
             pr_status_line(&pr).as_deref(),
-            Some("checks failed (2): cargo-test, clippy · merge blocked")
+            Some("merge blocked · checks failed (2): cargo-test, clippy")
         );
         assert_eq!(pr_detail_line(&pr).as_deref(), Some("approved (1): alice"));
     }
@@ -859,6 +922,7 @@ mod tests {
         e.merge_readiness = Some(MergeReadiness::Conflicts);
         let results = vec![RepoResult {
             repo: "owner/repo".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![make_pr_with_extra(1, e)]),
         }];
 
@@ -871,7 +935,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(lines.len(), 1);
         assert!(
-            lines[0].contains("ready · checks failed (2): cargo-test, clippy · merge conflicts")
+            lines[0].contains("ready · merge conflicts · checks failed (2): cargo-test, clippy")
         );
     }
 
@@ -879,6 +943,7 @@ mod tests {
     fn header_is_just_prefix_and_name() {
         let results = vec![RepoResult {
             repo: "a/b".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
         }];
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
@@ -887,14 +952,86 @@ mod tests {
     }
 
     #[test]
+    fn repository_metadata_covers_release_and_tag_states() {
+        let now = DateTime::parse_from_rfc3339("2026-07-16T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let release = ReleaseMetadata {
+            tag_name: "v2.4.0".into(),
+            published_at: DateTime::parse_from_rfc3339("2026-07-10T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            is_prerelease: false,
+        };
+
+        assert_eq!(
+            repo_metadata_segments(
+                Some(&RepoMetadata {
+                    release: Some(release.clone()),
+                    recent_tag: Some("v2.4.0".into()),
+                }),
+                &now,
+            ),
+            ["release v2.4.0 (6d)"]
+        );
+        assert_eq!(
+            repo_metadata_segments(
+                Some(&RepoMetadata {
+                    release: Some(ReleaseMetadata {
+                        is_prerelease: true,
+                        ..release
+                    }),
+                    recent_tag: Some("v2.5.0-rc.1".into()),
+                }),
+                &now,
+            ),
+            ["prerelease v2.4.0 (6d)", "tag v2.5.0-rc.1"]
+        );
+        assert_eq!(
+            repo_metadata_segments(
+                Some(&RepoMetadata {
+                    release: None,
+                    recent_tag: Some("v1.8.0".into()),
+                }),
+                &now,
+            ),
+            ["tag v1.8.0"]
+        );
+        assert!(repo_metadata_segments(Some(&RepoMetadata::default()), &now).is_empty());
+    }
+
+    #[test]
+    fn repository_header_drops_secondary_tag_when_narrow() {
+        let results = vec![RepoResult {
+            repo: "owner/repo".into(),
+            metadata: Some(RepoMetadata {
+                release: Some(ReleaseMetadata {
+                    tag_name: "v2.4.0".into(),
+                    published_at: Utc::now() - chrono::Duration::days(6),
+                    is_prerelease: false,
+                }),
+                recent_tag: Some("v2.5.0-rc.1".into()),
+            }),
+            status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
+        }];
+
+        let out = render_inner(&results, &Theme::default_theme(), false, 40);
+        let header_line = out.lines().find(|line| line.contains("━━")).unwrap();
+
+        assert_eq!(header_line, "━━ owner/repo · release v2.4.0 (6d)");
+    }
+
+    #[test]
     fn two_repos_separated_by_blank_line() {
         let results = vec![
             RepoResult {
                 repo: "a/b".into(),
+                metadata: None,
                 status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
             },
             RepoResult {
                 repo: "c/d".into(),
+                metadata: None,
                 status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 2, "y", 0)]),
             },
         ];
@@ -908,18 +1045,22 @@ mod tests {
         let results = vec![
             RepoResult {
                 repo: "a/empty".into(),
+                metadata: None,
                 status: RepoStatus::Items(vec![]),
             },
             RepoResult {
                 repo: "a/withitems".into(),
+                metadata: None,
                 status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
             },
             RepoResult {
                 repo: "a/missing".into(),
+                metadata: None,
                 status: RepoStatus::NotFound,
             },
             RepoResult {
                 repo: "a/flaky".into(),
+                metadata: None,
                 status: RepoStatus::Error(RepoError::Api("rate limited".into())),
             },
         ];
@@ -936,10 +1077,12 @@ mod tests {
         let results = vec![
             RepoResult {
                 repo: "a/empty".into(),
+                metadata: None,
                 status: RepoStatus::Items(vec![]),
             },
             RepoResult {
                 repo: "a/timeout".into(),
+                metadata: None,
                 status: RepoStatus::Error(RepoError::Timeout),
             },
         ];
@@ -953,10 +1096,12 @@ mod tests {
         let results = vec![
             RepoResult {
                 repo: "a/b".into(),
+                metadata: None,
                 status: RepoStatus::Items(vec![]),
             },
             RepoResult {
                 repo: "c/d".into(),
+                metadata: None,
                 status: RepoStatus::Items(vec![]),
             },
         ];
@@ -968,11 +1113,12 @@ mod tests {
     fn filtered_summary_describes_matching_tasks() {
         let results = vec![RepoResult {
             repo: "a/b".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![]),
         }];
         let out = render_inner_filtered(&results, &Theme::default_theme(), false, 80, true);
 
-        assert_eq!(out, "1 projects checked, 0 with matching tasks\n");
+        assert_eq!(out, "1 project checked, 0 with matching tasks\n");
     }
 
     #[test]
@@ -992,6 +1138,7 @@ mod tests {
     fn nerv_theme_with_color_produces_ansi_escapes() {
         let results = vec![RepoResult {
             repo: "owner/repo".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
         }];
         let out = render_inner(&results, &Theme::nerv(), true, 80);
@@ -1002,6 +1149,7 @@ mod tests {
     fn nerv_theme_without_color_has_no_ansi_escapes() {
         let results = vec![RepoResult {
             repo: "owner/repo".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
         }];
         let out = render_inner(&results, &Theme::nerv(), false, 80);
@@ -1012,6 +1160,7 @@ mod tests {
     fn evangelion_theme_with_color_produces_ansi_escapes() {
         let results = vec![RepoResult {
             repo: "owner/repo".into(),
+            metadata: None,
             status: RepoStatus::Items(vec![make_item(ItemKind::Issue, 1, "x", 0)]),
         }];
         let out = render_inner(&results, &Theme::evangelion(), true, 80);
