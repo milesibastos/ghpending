@@ -64,6 +64,7 @@ ghpending add                # pick repos from the saved user/org to track
 ghpending add --user <name>  # switch to a different user/org (replaces the saved one)
 ghpending add --all          # pick from every repo your token can reach (private included)
 ghpending        # print the digest
+ghpending <owner/repo>                    # inspect one repo without tracking it
 ghpending --author <login>                  # only items authored by this user
 ghpending --review-requested <login>        # only PRs awaiting this user
 ghpending list   # show tracked repos
@@ -74,6 +75,7 @@ ghpending rm     # remove repos from the list
   - **Private repos:** with a `GITHUB_TOKEN` that has the `repo` scope, `add` includes private repos automatically when the target is your own account or an org you belong to. For a third-party user only their public repos are visible.
   - `--all` lists every repo your token can reach — owned, collaborator and organization-member, private included — in a single picker, ignoring the saved user. Use it to grab private repos you collaborate on across different owners.
 - `ghpending` — fetches all tracked repos concurrently and prints a digest of open issues and pull requests.
+- `ghpending <owner/repo>` — fetches only that repository for one run, even if it is not tracked. It does not modify the watch list; configured themes and filters still apply.
 - `ghpending list` — prints the repos currently in your watch list.
 - `ghpending rm` — opens an interactive menu to select repos to remove from tracking.
 
@@ -85,7 +87,7 @@ Everything works unauthenticated for public repos, subject to GitHub's default 6
 GITHUB_TOKEN=$(gh auth token) ghpending
 ```
 
-The token is read silently at startup — no configuration needed. To track **private** repos (and have them show up in `ghpending add`), the token needs the `repo` scope (classic) or read access to the repo's Contents, Issues and Pull requests (fine-grained). Checks and Commit statuses read access enables CI details; without it, the rest of the digest still renders.
+The token is read silently at startup — no configuration needed. To track **private** repos (and have them show up in `ghpending add`), the token needs the `repo` scope (classic) or read access to the repo's Contents, Issues and Pull requests (fine-grained). A token also enables the best-effort GraphQL repository and PR context described below. Checks and Commit statuses read access enables CI details; without it, the rest of the digest still renders.
 
 ### GitHub API proxy (optional)
 
@@ -152,16 +154,36 @@ If either CLI role option is present, the CLI author and review-request lists
 replace both configured role lists for that invocation. The configured matching
 mode remains in effect unless `--match` overrides it.
 
+### Repository versions
+
+Repository headers show the most recently published non-draft GitHub release and
+the tag whose target commit is most recent. A release already names its tag, so
+an identical tag is not repeated. Repositories that publish tags without GitHub
+releases fall back to the tag alone:
+
+```text
+━━ owner/repo · release v2.4.0 (6d)
+━━ owner/repo · release v2.4.0 (6d) · tag v2.5.0-rc.1
+━━ owner/repo · prerelease v3.0.0-rc.2 (2d)
+━━ owner/repo · tag v1.8.0
+```
+
+Release age uses GitHub's publication timestamp. Tags do not have a reliable
+creation timestamp, so tag-only headers omit an age. The tag is ordered by its
+target commit date, not semantic version. Repository context is best-effort and
+requires a token; it is omitted on API failure and when the terminal is too
+narrow, without affecting issues or pull requests.
+
 ### PR context
 
-The second PR line appends checks and merge readiness after `ready`/`draft`;
+The second PR line appends merge readiness and checks after `ready`/`draft`;
 the optional third line holds review context. Status segments include:
 
 ```text
-opened 2h ago by alice · ready · checks failed (2): cargo-test, clippy · merge blocked
+opened 2h ago by alice · ready · merge blocked · checks failed (2): cargo-test, clippy
 awaiting review (1): alice
-opened 1d ago by bob · ready · checks pending (1): integration · merge unstable
-opened 3d ago by carol · ready · checks passed (4) · merge ready
+opened 1d ago by bob · ready · merge unstable · checks pending (1): integration
+opened 3d ago by carol · ready · merge ready · checks passed (4)
 approved (2): alice, bob
 approved (2): alice, bob · awaiting review (2): carol, team:my-org/backend
 1 unresolved by alice · awaiting review (1): bob

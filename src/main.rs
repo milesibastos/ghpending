@@ -19,6 +19,9 @@ async fn main() -> Result<()> {
     if cli.command.is_some() && cli.has_digest_filter_args() {
         bail!("--author, --review-requested, and --match only apply to the digest");
     }
+    if cli.command.is_some() && cli.repo.is_some() {
+        bail!("OWNER/REPO only applies to the digest");
+    }
 
     let (cfg_path, cfg_source) = config::resolve_path(cli.config.as_deref())?;
     if cfg_source != config::ConfigSource::Global {
@@ -56,6 +59,7 @@ async fn main() -> Result<()> {
                 &crab,
                 &resolved_theme,
                 &cfg_path,
+                cli.repo.as_deref(),
                 &cli.authors,
                 &cli.review_requested,
                 cli.filter_mode,

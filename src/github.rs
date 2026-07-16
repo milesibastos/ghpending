@@ -315,7 +315,21 @@ impl CheckContextInfo {
 #[derive(Debug, Clone)]
 pub struct RepoResult {
     pub repo: String,
+    pub metadata: Option<RepoMetadata>,
     pub status: RepoStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepoMetadata {
+    pub release: Option<ReleaseMetadata>,
+    pub recent_tag: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseMetadata {
+    pub tag_name: String,
+    pub published_at: DateTime<Utc>,
+    pub is_prerelease: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -538,21 +552,31 @@ pub async fn fetch_repo_items(crab: &Octocrab, repo: &str) -> RepoResult {
     let Some((owner, name)) = split_repo(repo) else {
         return RepoResult {
             repo: repo.to_owned(),
+            metadata: None,
             status: RepoStatus::NotFound,
         };
     };
 
-    match fetch_items_inner(crab, owner, name).await {
+    let (items_result, metadata_result) = tokio::join!(
+        fetch_items_inner(crab, owner, name),
+        fetch_repo_metadata(crab, owner, name),
+    );
+    let metadata = metadata_result;
+
+    match items_result {
         Ok(items) => RepoResult {
             repo: repo.to_owned(),
+            metadata,
             status: RepoStatus::Items(items),
         },
         Err(GithubError::NotFound(_)) => RepoResult {
             repo: repo.to_owned(),
+            metadata,
             status: RepoStatus::NotFound,
         },
         Err(GithubError::Api(e)) => RepoResult {
             repo: repo.to_owned(),
+            metadata,
             status: RepoStatus::Error(RepoError::Api(e.to_string())),
         },
     }
@@ -668,6 +692,38 @@ async fn fetch_items_inner(
     }
 
     Ok(items)
+}
+
+/// Fetches release/tag context independently from issue and PR data. Release
+/// metadata is omitted when the first 100 results are not the complete set,
+/// because GitHub cannot order releases by publication time server-side.
+async fn fetch_repo_metadata(crab: &Octocrab, owner: &str, name: &str) -> Option<RepoMetadata> {
+    const QUERY: &str = r#"
+query($owner:String!, $name:String!) {
+  repository(owner:$owner, name:$name) {
+    releases(first:100, orderBy:{field:CREATED_AT,direction:DESC}) {
+      nodes { tagName publishedAt isPrerelease isDraft }
+      pageInfo { hasNextPage }
+    }
+    refs(refPrefix:"refs/tags/", first:1, orderBy:{field:TAG_COMMIT_DATE,direction:DESC}) {
+      nodes { name }
+    }
+  }
+}"#;
+
+    let body = serde_json::json!({
+        "query": QUERY,
+        "variables": { "owner": owner, "name": name },
+    });
+    let resp: GqlMetadataData = tokio::time::timeout(ENRICH_TIMEOUT, crab.graphql(&body))
+        .await
+        .ok()?
+        .ok()?;
+    let Some(repo) = resp.repository else {
+        return Some(RepoMetadata::default());
+    };
+
+    Some(repo.into_metadata())
 }
 
 /// Fetches PR-only review and merge enrichment, newest activity first. Pages
@@ -831,6 +887,79 @@ struct GqlPageInfo {
     has_next_page: bool,
     #[serde(rename = "endCursor")]
     end_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GqlMetadataData {
+    repository: Option<GqlMetadataRepo>,
+}
+
+#[derive(Deserialize)]
+struct GqlMetadataRepo {
+    #[serde(default)]
+    releases: Option<GqlNodes<GqlRelease>>,
+    #[serde(default)]
+    refs: Option<GqlNodes<GqlRef>>,
+}
+
+#[derive(Deserialize)]
+struct GqlRelease {
+    #[serde(rename = "tagName")]
+    tag_name: String,
+    #[serde(rename = "publishedAt")]
+    published_at: Option<String>,
+    #[serde(rename = "isPrerelease")]
+    is_prerelease: bool,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+}
+
+#[derive(Deserialize)]
+struct GqlRef {
+    name: String,
+}
+
+impl GqlMetadataRepo {
+    fn into_metadata(self) -> RepoMetadata {
+        let releases = self.releases.unwrap_or_default();
+        let release = if releases.page_info.has_next_page {
+            None
+        } else {
+            releases
+                .nodes
+                .into_iter()
+                .filter_map(GqlRelease::into_metadata)
+                .max_by_key(|release| release.published_at)
+        };
+        let recent_tag = self
+            .refs
+            .unwrap_or_default()
+            .nodes
+            .into_iter()
+            .next()
+            .map(|tag| tag.name);
+
+        RepoMetadata {
+            release,
+            recent_tag,
+        }
+    }
+}
+
+impl GqlRelease {
+    fn into_metadata(self) -> Option<ReleaseMetadata> {
+        if self.is_draft {
+            return None;
+        }
+        let published_at = DateTime::parse_from_rfc3339(self.published_at.as_deref()?)
+            .ok()?
+            .with_timezone(&Utc);
+        Some(ReleaseMetadata {
+            tag_name: self.tag_name,
+            published_at,
+            is_prerelease: self.is_prerelease,
+        })
+    }
 }
 
 fn deserialize_nodes<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
@@ -1419,6 +1548,96 @@ mod tests {
         let second = nodes.remove(0).into_extra();
         assert_eq!(second.merge_readiness, Some(MergeReadiness::Ready));
         assert_eq!(second.checks, None);
+    }
+
+    #[test]
+    fn metadata_selects_latest_published_release_and_recent_tag() {
+        let data: GqlMetadataData = serde_json::from_value(serde_json::json!({
+            "repository": {
+                "releases": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [
+                        {
+                            "tagName": "v2.0.0",
+                            "publishedAt": "2026-06-01T12:00:00Z",
+                            "isPrerelease": false,
+                            "isDraft": false
+                        },
+                        {
+                            "tagName": "v2.1.0-rc.1",
+                            "publishedAt": "2026-07-01T12:00:00Z",
+                            "isPrerelease": true,
+                            "isDraft": false
+                        },
+                        {
+                            "tagName": "v3.0.0-draft",
+                            "publishedAt": "2026-07-10T12:00:00Z",
+                            "isPrerelease": false,
+                            "isDraft": true
+                        },
+                        {
+                            "tagName": "v1.0.0-unpublished",
+                            "publishedAt": null,
+                            "isPrerelease": false,
+                            "isDraft": false
+                        }
+                    ]
+                },
+                "refs": { "nodes": [null, { "name": "v2.2.0" }] }
+            }
+        }))
+        .unwrap();
+
+        let metadata = data.repository.unwrap().into_metadata();
+
+        assert_eq!(
+            metadata.release,
+            Some(ReleaseMetadata {
+                tag_name: "v2.1.0-rc.1".into(),
+                published_at: DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                is_prerelease: true,
+            })
+        );
+        assert_eq!(metadata.recent_tag.as_deref(), Some("v2.2.0"));
+    }
+
+    #[test]
+    fn incomplete_release_page_keeps_tag_but_omits_release() {
+        let data: GqlMetadataData = serde_json::from_value(serde_json::json!({
+            "repository": {
+                "releases": {
+                    "pageInfo": { "hasNextPage": true },
+                    "nodes": [{
+                        "tagName": "v2.0.0",
+                        "publishedAt": "2026-06-01T12:00:00Z",
+                        "isPrerelease": false,
+                        "isDraft": false
+                    }]
+                },
+                "refs": { "nodes": [{ "name": "v2.0.0" }] }
+            }
+        }))
+        .unwrap();
+
+        let metadata = data.repository.unwrap().into_metadata();
+
+        assert_eq!(metadata.release, None);
+        assert_eq!(metadata.recent_tag.as_deref(), Some("v2.0.0"));
+    }
+
+    #[test]
+    fn metadata_graphql_shape_tolerates_null_connections_and_nodes() {
+        let data: GqlMetadataData = serde_json::from_value(serde_json::json!({
+            "repository": { "releases": null, "refs": null }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            data.repository.unwrap().into_metadata(),
+            RepoMetadata::default()
+        );
     }
 
     #[test]
