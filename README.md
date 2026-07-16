@@ -150,8 +150,35 @@ ghpending --author alice --review-requested bob --match all
 
 If either CLI role option is present, the CLI author and review-request lists
 replace both configured role lists for that invocation. The configured matching
-mode remains in effect unless `--match` overrides it. PR output includes a
-`review requested:` segment showing current user and team requests.
+mode remains in effect unless `--match` overrides it.
+
+### Review context
+
+PR detail lines condense the current review state into segments such as:
+
+```text
+approved (2): alice, bob · awaiting review (2): carol, team:my-org/backend
+1 unresolved by alice · awaiting review (1): bob
+awaiting re-review (1): alice · awaiting review (1): bob
+```
+
+Human reviewers are grouped by their latest state, with approvals first. `N` is
+the number of reviewers in a state group, but the number of current request
+targets for `awaiting review` and `awaiting re-review`; a team counts as one
+target. A requested user found in recent submitted-review history moves to
+`awaiting re-review`, and their stale review state is omitted. Teams always
+remain under `awaiting review` because reviews cannot be attributed reliably to
+a team.
+
+A matching aggregate GitHub decision is omitted, as is `review required` when
+current requests already show who or which team is awaited. A neutral
+`commented` state is hidden only when the same login already appears in
+`unresolved`.
+
+Review states and unresolved threads are best-effort GraphQL enrichment. Current
+review requests come from REST and still render if enrichment fails. Re-review
+detection also depends on that enrichment; without recent history, the request
+falls back to ordinary `awaiting review`.
 
 ## Themes
 

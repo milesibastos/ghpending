@@ -56,6 +56,9 @@ pub struct PrExtra {
     pub codex_reviewed: bool,
     /// Latest review state per non-Codex reviewer.
     pub reviews: Vec<(String, ReviewState)>,
+    /// Logins found in recent submitted-review history, used to distinguish an
+    /// active first-time request from a re-review request.
+    pub prior_reviewers: Vec<String>,
     /// GitHub's rollup, populated only when an opinionated review or branch
     /// protection forces it (usually `None` here).
     pub decision: Option<ReviewDecision>,
@@ -142,6 +145,22 @@ fn collapse_reviews(reviews: &[ReviewInfo]) -> (Vec<(String, ReviewState)>, bool
         }
     }
     (humans, codex_reviewed)
+}
+
+fn prior_reviewers(reviews: &[ReviewInfo]) -> Vec<String> {
+    let mut logins = Vec::new();
+    for review in reviews {
+        if review_state_from(&review.state).is_none() {
+            continue;
+        }
+        if !logins
+            .iter()
+            .any(|login: &String| login.eq_ignore_ascii_case(&review.login))
+        {
+            logins.push(review.login.clone());
+        }
+    }
+    logins
 }
 
 fn review_state_from(state: &str) -> Option<ReviewState> {
@@ -528,8 +547,9 @@ async fn fetch_items_inner(
     Ok(items)
 }
 
-/// Fetches PR-only enrichment (unresolved threads, Codex reaction, review
-/// states) for every open PR in one GraphQL query, keyed by PR number.
+/// Fetches PR-only enrichment (unresolved threads, Codex reaction, current
+/// review states, and recent review history) for every open PR in one GraphQL
+/// query, keyed by PR number.
 async fn fetch_pr_extras(
     crab: &Octocrab,
     owner: &str,
@@ -547,6 +567,7 @@ query($owner:String!, $name:String!) {
           nodes { isResolved comments(first:1) { nodes { author { login } } } }
         }
         latestReviews(first:100) { nodes { author { login } state } }
+        reviews(last:100) { nodes { author { login } state } }
       }
     }
   }
@@ -605,6 +626,8 @@ struct GqlPr {
     review_threads: GqlNodes<GqlThread>,
     #[serde(rename = "latestReviews", default)]
     latest_reviews: GqlNodes<GqlReview>,
+    #[serde(default)]
+    reviews: GqlNodes<GqlReview>,
 }
 
 #[derive(Deserialize)]
@@ -665,7 +688,7 @@ impl From<GqlPr> for PrExtra {
                 })
             })
             .collect();
-        let reviews: Vec<ReviewInfo> = pr
+        let latest_reviews: Vec<ReviewInfo> = pr
             .latest_reviews
             .nodes
             .into_iter()
@@ -676,13 +699,25 @@ impl From<GqlPr> for PrExtra {
                 })
             })
             .collect();
+        let review_history: Vec<ReviewInfo> = pr
+            .reviews
+            .nodes
+            .into_iter()
+            .filter_map(|r| {
+                r.author.map(|a| ReviewInfo {
+                    login: a.login,
+                    state: r.state,
+                })
+            })
+            .collect();
 
-        let (human_reviews, codex_reviewed) = collapse_reviews(&reviews);
+        let (human_reviews, codex_reviewed) = collapse_reviews(&latest_reviews);
         PrExtra {
             unresolved: unresolved_by_author(&threads),
             codex: codex_reaction(&reactions),
             codex_reviewed,
             reviews: human_reviews,
+            prior_reviewers: prior_reviewers(&review_history),
             decision: pr.review_decision.as_deref().and_then(review_decision_from),
         }
     }
@@ -806,12 +841,33 @@ mod tests {
         let reviews = [review("milesibastos", "COMMENTED")];
         let (humans, codex_reviewed) = collapse_reviews(&reviews);
         assert!(!codex_reviewed);
-        assert_eq!(humans, vec![("milesibastos".to_owned(), ReviewState::Commented)]);
+        assert_eq!(
+            humans,
+            vec![("milesibastos".to_owned(), ReviewState::Commented)]
+        );
+    }
+
+    #[test]
+    fn prior_reviewers_are_submitted_and_unique_case_insensitively() {
+        let reviews = [
+            review("pending-reviewer", "PENDING"),
+            review("anbillin", "COMMENTED"),
+            review("mdo2", "APPROVED"),
+            review("AnBillin", "COMMENTED"),
+        ];
+
+        assert_eq!(
+            prior_reviewers(&reviews),
+            vec!["anbillin".to_owned(), "mdo2".to_owned()]
+        );
     }
 
     #[test]
     fn review_decision_from_maps_known_values() {
-        assert_eq!(review_decision_from("APPROVED"), Some(ReviewDecision::Approved));
+        assert_eq!(
+            review_decision_from("APPROVED"),
+            Some(ReviewDecision::Approved)
+        );
         assert_eq!(
             review_decision_from("CHANGES_REQUESTED"),
             Some(ReviewDecision::ChangesRequested)

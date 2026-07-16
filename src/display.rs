@@ -4,7 +4,8 @@ use terminal_size::{Width, terminal_size};
 
 use crate::format::{relative_time, truncate_title};
 use crate::github::{
-    CodexReaction, ItemKind, PrExtra, RepoItem, RepoResult, RepoStatus, ReviewDecision, ReviewState,
+    CodexReaction, ItemKind, PrExtra, RepoItem, RepoResult, RepoStatus, ReviewDecision,
+    ReviewState, is_codex_actor,
 };
 use crate::theme::Theme;
 
@@ -151,21 +152,47 @@ fn pr_state_label(item: &RepoItem) -> Option<&'static str> {
 
 fn pr_detail_line(item: &RepoItem) -> Option<String> {
     let mut segs = Vec::new();
+    let mut awaiting_review = Vec::new();
+    let mut awaiting_rereview = Vec::new();
 
-    if !item.requested_reviewers.is_empty() || !item.requested_teams.is_empty() {
-        let mut requested = item.requested_reviewers.clone();
-        requested.extend(
-            item.requested_teams
-                .iter()
-                .map(|team| format!("team:{team}")),
-        );
-        segs.push(format!("review requested: {}", requested.join(", ")));
+    for reviewer in &item.requested_reviewers {
+        if item.pr_extra.as_ref().is_some_and(|extra| {
+            extra.prior_reviewers.iter().any(|prior| {
+                prior.eq_ignore_ascii_case(reviewer)
+                    || (is_codex_actor(prior) && is_codex_actor(reviewer))
+            })
+        }) {
+            awaiting_rereview.push(reviewer.clone());
+        } else {
+            awaiting_review.push(reviewer.clone());
+        }
     }
+    awaiting_review.extend(
+        item.requested_teams
+            .iter()
+            .map(|team| format!("team:{team}")),
+    );
+    let has_review_requests = !awaiting_review.is_empty() || !awaiting_rereview.is_empty();
 
     if let Some(extra) = &item.pr_extra
-        && let Some(line) = pr_extra_line(extra)
+        && let Some(line) = pr_extra_line(extra, has_review_requests, &awaiting_rereview)
     {
         segs.push(line);
+    }
+
+    if !awaiting_rereview.is_empty() {
+        segs.push(format!(
+            "awaiting re-review ({}): {}",
+            awaiting_rereview.len(),
+            awaiting_rereview.join(", ")
+        ));
+    }
+    if !awaiting_review.is_empty() {
+        segs.push(format!(
+            "awaiting review ({}): {}",
+            awaiting_review.len(),
+            awaiting_review.join(", ")
+        ));
     }
 
     if segs.is_empty() {
@@ -177,14 +204,27 @@ fn pr_detail_line(item: &RepoItem) -> Option<String> {
 
 /// The optional third line under a PR: Codex status, unresolved-thread
 /// attribution, and human review states. `None` when there is nothing to show.
-fn pr_extra_line(extra: &PrExtra) -> Option<String> {
+fn pr_extra_line(
+    extra: &PrExtra,
+    has_review_requests: bool,
+    awaiting_rereview: &[String],
+) -> Option<String> {
     let mut segs: Vec<String> = Vec::new();
 
-    match extra.codex {
-        Some(CodexReaction::Reviewing) => segs.push("codex 👀 reviewing".into()),
-        Some(CodexReaction::Lgtm) => segs.push("codex 👍 lgtm".into()),
-        None if extra.codex_reviewed => segs.push("codex commented".into()),
-        None => {}
+    if !awaiting_rereview.iter().any(|login| is_codex_actor(login)) {
+        match extra.codex {
+            Some(CodexReaction::Reviewing) => segs.push("codex 👀 reviewing".into()),
+            Some(CodexReaction::Lgtm) => segs.push("codex 👍 lgtm".into()),
+            None if extra.codex_reviewed
+                && !extra
+                    .unresolved
+                    .iter()
+                    .any(|(author, _)| is_codex_actor(author)) =>
+            {
+                segs.push("codex commented".into());
+            }
+            None => {}
+        }
     }
 
     if !extra.unresolved.is_empty() {
@@ -195,14 +235,55 @@ fn pr_extra_line(extra: &PrExtra) -> Option<String> {
             .map(|(login, _)| login.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        segs.push(format!("{total} unresolved ({authors})"));
+        segs.push(format!("{total} unresolved by {authors}"));
     }
 
+    let mut review_groups: Vec<(ReviewState, Vec<&str>)> = Vec::new();
     for (login, state) in &extra.reviews {
-        segs.push(format!("{login} {}", review_state_label(*state)));
+        if awaiting_rereview
+            .iter()
+            .any(|reviewer| reviewer.eq_ignore_ascii_case(login))
+        {
+            continue;
+        }
+        if *state == ReviewState::Commented
+            && extra
+                .unresolved
+                .iter()
+                .any(|(author, _)| author.eq_ignore_ascii_case(login))
+        {
+            continue;
+        }
+        if let Some((_, logins)) = review_groups
+            .iter_mut()
+            .find(|(group_state, _)| group_state == state)
+        {
+            logins.push(login);
+        } else {
+            review_groups.push((*state, vec![login]));
+        }
+    }
+    review_groups.sort_by_key(|(state, _)| match state {
+        ReviewState::Approved => 0,
+        ReviewState::ChangesRequested => 1,
+        ReviewState::Commented => 2,
+        ReviewState::Dismissed => 3,
+    });
+    for (state, logins) in &review_groups {
+        segs.push(format!(
+            "{} ({}): {}",
+            review_state_label(*state),
+            logins.len(),
+            logins.join(", ")
+        ));
     }
 
-    if let Some(decision) = extra.decision {
+    if let Some(decision) = extra.decision
+        && !(decision == ReviewDecision::ReviewRequired && has_review_requests)
+        && !review_groups
+            .iter()
+            .any(|(state, _)| review_state_label(*state) == review_decision_label(decision))
+    {
         segs.push(review_decision_label(decision).to_owned());
     }
 
@@ -364,6 +445,7 @@ mod tests {
             codex,
             codex_reviewed,
             reviews: vec![],
+            prior_reviewers: vec![],
             decision: None,
         }
     }
@@ -393,6 +475,17 @@ mod tests {
     }
 
     #[test]
+    fn codex_commented_is_hidden_when_codex_has_an_unresolved_thread() {
+        let mut e = extra(None, true);
+        e.unresolved = vec![("chatgpt-codex-connector".into(), 1)];
+
+        assert_eq!(
+            pr_extra_line(&e, false, &[]).as_deref(),
+            Some("1 unresolved by chatgpt-codex-connector")
+        );
+    }
+
+    #[test]
     fn unresolved_lists_every_author_with_total() {
         let mut e = extra(None, false);
         e.unresolved = vec![
@@ -404,23 +497,124 @@ mod tests {
             status: RepoStatus::Items(vec![make_pr_with_extra(1, e)]),
         }];
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
-        assert!(out.contains("3 unresolved (chatgpt-codex-connector, alvarolopes)"));
+        assert!(out.contains("3 unresolved by chatgpt-codex-connector, alvarolopes"));
     }
 
     #[test]
-    fn human_review_states_render() {
+    fn human_review_states_are_grouped_and_redundant_decision_is_omitted() {
         let mut e = extra(None, false);
         e.reviews = vec![
-            ("alice".into(), ReviewState::Approved),
             ("bob".into(), ReviewState::ChangesRequested),
+            ("alice".into(), ReviewState::Approved),
+            ("carol".into(), ReviewState::Approved),
+            ("dave".into(), ReviewState::Commented),
         ];
-        let results = vec![RepoResult {
-            repo: "a/b".into(),
-            status: RepoStatus::Items(vec![make_pr_with_extra(1, e)]),
-        }];
-        let out = render_inner(&results, &Theme::default_theme(), false, 80);
-        assert!(out.contains("alice approved"));
-        assert!(out.contains("bob changes requested"));
+        e.decision = Some(ReviewDecision::Approved);
+
+        assert_eq!(
+            pr_extra_line(&e, false, &[]).as_deref(),
+            Some("approved (2): alice, carol · changes requested (1): bob · commented (1): dave")
+        );
+    }
+
+    #[test]
+    fn distinct_review_decision_remains_after_grouped_reviews() {
+        let mut e = extra(None, false);
+        e.reviews = vec![("anbillin".into(), ReviewState::Commented)];
+        e.decision = Some(ReviewDecision::ReviewRequired);
+
+        assert_eq!(
+            pr_extra_line(&e, false, &[]).as_deref(),
+            Some("commented (1): anbillin · review required")
+        );
+    }
+
+    #[test]
+    fn requested_and_approved_reviewers_render_as_groups() {
+        let mut e = extra(None, false);
+        e.reviews = vec![
+            ("anbillin".into(), ReviewState::Approved),
+            ("JorgeBillin".into(), ReviewState::Approved),
+        ];
+        e.decision = Some(ReviewDecision::Approved);
+        let mut pr = make_pr_with_extra(1, e);
+        pr.requested_reviewers = vec!["milesibastos".into(), "mishamaliga".into()];
+
+        assert_eq!(
+            pr_detail_line(&pr).as_deref(),
+            Some(
+                "approved (2): anbillin, JorgeBillin · awaiting review (2): milesibastos, mishamaliga"
+            )
+        );
+    }
+
+    #[test]
+    fn prior_reviewer_with_active_request_is_explicitly_awaiting_rereview() {
+        let mut e = extra(None, false);
+        e.reviews = vec![("anbillin".into(), ReviewState::Commented)];
+        e.prior_reviewers = vec!["AnBillin".into()];
+        let mut pr = make_pr_with_extra(1, e);
+        pr.requested_reviewers = vec![
+            "mdo2".into(),
+            "mishamaliga".into(),
+            "JorgeBillin".into(),
+            "sergiopanaderobillin".into(),
+            "anbillin".into(),
+        ];
+
+        assert_eq!(
+            pr_detail_line(&pr).as_deref(),
+            Some(
+                "awaiting re-review (1): anbillin · awaiting review (4): mdo2, mishamaliga, JorgeBillin, sergiopanaderobillin"
+            )
+        );
+    }
+
+    #[test]
+    fn codex_login_variants_are_matched_for_rereview() {
+        let mut e = extra(Some(CodexReaction::Lgtm), true);
+        e.prior_reviewers = vec!["chatgpt-codex-connector".into()];
+        let mut pr = make_pr_with_extra(1, e);
+        pr.requested_reviewers = vec!["chatgpt-codex-connector[bot]".into()];
+
+        assert_eq!(
+            pr_detail_line(&pr).as_deref(),
+            Some("awaiting re-review (1): chatgpt-codex-connector[bot]")
+        );
+    }
+
+    #[test]
+    fn unresolved_comment_and_requested_review_collapse_to_actionable_signals() {
+        let mut e = extra(None, false);
+        e.unresolved = vec![("anbillin".into(), 1)];
+        e.reviews = vec![("anbillin".into(), ReviewState::Commented)];
+        e.decision = Some(ReviewDecision::ReviewRequired);
+        let mut pr = make_pr_with_extra(1, e);
+        pr.requested_reviewers = vec![
+            "mdo2".into(),
+            "mishamaliga".into(),
+            "JorgeBillin".into(),
+            "sergiopanaderobillin".into(),
+        ];
+
+        assert_eq!(
+            pr_detail_line(&pr).as_deref(),
+            Some(
+                "1 unresolved by anbillin · awaiting review (4): mdo2, mishamaliga, JorgeBillin, sergiopanaderobillin"
+            )
+        );
+    }
+
+    #[test]
+    fn comment_from_another_reviewer_remains_with_unresolved_threads() {
+        let mut e = extra(None, false);
+        e.unresolved = vec![("alice".into(), 1)];
+        e.reviews = vec![("bob".into(), ReviewState::Commented)];
+
+        assert_eq!(
+            pr_extra_line(&e, false, &[]).as_deref(),
+            Some("1 unresolved by alice · commented (1): bob")
+        );
     }
 
     #[test]
@@ -434,7 +628,7 @@ mod tests {
         }];
 
         let out = render_inner(&results, &Theme::default_theme(), false, 80);
-        assert!(out.contains("review requested: alice, team:owner/backend"));
+        assert!(out.contains("awaiting review (2): alice, team:owner/backend"));
     }
 
     #[test]
