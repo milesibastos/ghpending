@@ -152,25 +152,46 @@ fn pr_state_label(item: &RepoItem) -> Option<&'static str> {
 
 fn pr_detail_line(item: &RepoItem) -> Option<String> {
     let mut segs = Vec::new();
-    let awaiting_review = !item.requested_reviewers.is_empty() || !item.requested_teams.is_empty();
+    let mut awaiting_review = Vec::new();
+    let mut awaiting_rereview = Vec::new();
+
+    for reviewer in &item.requested_reviewers {
+        if item.pr_extra.as_ref().is_some_and(|extra| {
+            extra.prior_reviewers.iter().any(|prior| {
+                prior.eq_ignore_ascii_case(reviewer)
+                    || (is_codex_actor(prior) && is_codex_actor(reviewer))
+            })
+        }) {
+            awaiting_rereview.push(reviewer.clone());
+        } else {
+            awaiting_review.push(reviewer.clone());
+        }
+    }
+    awaiting_review.extend(
+        item.requested_teams
+            .iter()
+            .map(|team| format!("team:{team}")),
+    );
+    let has_review_requests = !awaiting_review.is_empty() || !awaiting_rereview.is_empty();
 
     if let Some(extra) = &item.pr_extra
-        && let Some(line) = pr_extra_line(extra, awaiting_review)
+        && let Some(line) = pr_extra_line(extra, has_review_requests, &awaiting_rereview)
     {
         segs.push(line);
     }
 
-    if awaiting_review {
-        let mut requested = item.requested_reviewers.clone();
-        requested.extend(
-            item.requested_teams
-                .iter()
-                .map(|team| format!("team:{team}")),
-        );
+    if !awaiting_rereview.is_empty() {
+        segs.push(format!(
+            "awaiting re-review ({}): {}",
+            awaiting_rereview.len(),
+            awaiting_rereview.join(", ")
+        ));
+    }
+    if !awaiting_review.is_empty() {
         segs.push(format!(
             "awaiting review ({}): {}",
-            requested.len(),
-            requested.join(", ")
+            awaiting_review.len(),
+            awaiting_review.join(", ")
         ));
     }
 
@@ -183,21 +204,27 @@ fn pr_detail_line(item: &RepoItem) -> Option<String> {
 
 /// The optional third line under a PR: Codex status, unresolved-thread
 /// attribution, and human review states. `None` when there is nothing to show.
-fn pr_extra_line(extra: &PrExtra, awaiting_review: bool) -> Option<String> {
+fn pr_extra_line(
+    extra: &PrExtra,
+    has_review_requests: bool,
+    awaiting_rereview: &[String],
+) -> Option<String> {
     let mut segs: Vec<String> = Vec::new();
 
-    match extra.codex {
-        Some(CodexReaction::Reviewing) => segs.push("codex 👀 reviewing".into()),
-        Some(CodexReaction::Lgtm) => segs.push("codex 👍 lgtm".into()),
-        None if extra.codex_reviewed
-            && !extra
-                .unresolved
-                .iter()
-                .any(|(author, _)| is_codex_actor(author)) =>
-        {
-            segs.push("codex commented".into());
+    if !awaiting_rereview.iter().any(|login| is_codex_actor(login)) {
+        match extra.codex {
+            Some(CodexReaction::Reviewing) => segs.push("codex 👀 reviewing".into()),
+            Some(CodexReaction::Lgtm) => segs.push("codex 👍 lgtm".into()),
+            None if extra.codex_reviewed
+                && !extra
+                    .unresolved
+                    .iter()
+                    .any(|(author, _)| is_codex_actor(author)) =>
+            {
+                segs.push("codex commented".into());
+            }
+            None => {}
         }
-        None => {}
     }
 
     if !extra.unresolved.is_empty() {
@@ -213,6 +240,12 @@ fn pr_extra_line(extra: &PrExtra, awaiting_review: bool) -> Option<String> {
 
     let mut review_groups: Vec<(ReviewState, Vec<&str>)> = Vec::new();
     for (login, state) in &extra.reviews {
+        if awaiting_rereview
+            .iter()
+            .any(|reviewer| reviewer.eq_ignore_ascii_case(login))
+        {
+            continue;
+        }
         if *state == ReviewState::Commented
             && extra
                 .unresolved
@@ -246,7 +279,7 @@ fn pr_extra_line(extra: &PrExtra, awaiting_review: bool) -> Option<String> {
     }
 
     if let Some(decision) = extra.decision
-        && !(decision == ReviewDecision::ReviewRequired && awaiting_review)
+        && !(decision == ReviewDecision::ReviewRequired && has_review_requests)
         && !review_groups
             .iter()
             .any(|(state, _)| review_state_label(*state) == review_decision_label(decision))
@@ -412,6 +445,7 @@ mod tests {
             codex,
             codex_reviewed,
             reviews: vec![],
+            prior_reviewers: vec![],
             decision: None,
         }
     }
@@ -446,7 +480,7 @@ mod tests {
         e.unresolved = vec![("chatgpt-codex-connector".into(), 1)];
 
         assert_eq!(
-            pr_extra_line(&e, false).as_deref(),
+            pr_extra_line(&e, false, &[]).as_deref(),
             Some("1 unresolved by chatgpt-codex-connector")
         );
     }
@@ -478,7 +512,7 @@ mod tests {
         e.decision = Some(ReviewDecision::Approved);
 
         assert_eq!(
-            pr_extra_line(&e, false).as_deref(),
+            pr_extra_line(&e, false, &[]).as_deref(),
             Some("approved (2): alice, carol · changes requested (1): bob · commented (1): dave")
         );
     }
@@ -490,7 +524,7 @@ mod tests {
         e.decision = Some(ReviewDecision::ReviewRequired);
 
         assert_eq!(
-            pr_extra_line(&e, false).as_deref(),
+            pr_extra_line(&e, false, &[]).as_deref(),
             Some("commented (1): anbillin · review required")
         );
     }
@@ -511,6 +545,41 @@ mod tests {
             Some(
                 "approved (2): anbillin, JorgeBillin · awaiting review (2): milesibastos, mishamaliga"
             )
+        );
+    }
+
+    #[test]
+    fn prior_reviewer_with_active_request_is_explicitly_awaiting_rereview() {
+        let mut e = extra(None, false);
+        e.reviews = vec![("anbillin".into(), ReviewState::Commented)];
+        e.prior_reviewers = vec!["AnBillin".into()];
+        let mut pr = make_pr_with_extra(1, e);
+        pr.requested_reviewers = vec![
+            "mdo2".into(),
+            "mishamaliga".into(),
+            "JorgeBillin".into(),
+            "sergiopanaderobillin".into(),
+            "anbillin".into(),
+        ];
+
+        assert_eq!(
+            pr_detail_line(&pr).as_deref(),
+            Some(
+                "awaiting re-review (1): anbillin · awaiting review (4): mdo2, mishamaliga, JorgeBillin, sergiopanaderobillin"
+            )
+        );
+    }
+
+    #[test]
+    fn codex_login_variants_are_matched_for_rereview() {
+        let mut e = extra(Some(CodexReaction::Lgtm), true);
+        e.prior_reviewers = vec!["chatgpt-codex-connector".into()];
+        let mut pr = make_pr_with_extra(1, e);
+        pr.requested_reviewers = vec!["chatgpt-codex-connector[bot]".into()];
+
+        assert_eq!(
+            pr_detail_line(&pr).as_deref(),
+            Some("awaiting re-review (1): chatgpt-codex-connector[bot]")
         );
     }
 
@@ -543,7 +612,7 @@ mod tests {
         e.reviews = vec![("bob".into(), ReviewState::Commented)];
 
         assert_eq!(
-            pr_extra_line(&e, false).as_deref(),
+            pr_extra_line(&e, false, &[]).as_deref(),
             Some("1 unresolved by alice · commented (1): bob")
         );
     }
